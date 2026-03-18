@@ -1,0 +1,22 @@
+# Virtual environment
+venv/
+
+# Output PDFs
+output/
+
+# Environment variables
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Policy state (runtime)
+assets/
+
+# Debug/reference images
+image.png
+
+# OS files
+Thumbs.db
+.DS_Store

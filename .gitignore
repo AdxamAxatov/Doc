@@ -14,6 +14,8 @@ __pycache__/
 # Policy state (runtime)
 assets/
 
+.claude
+
 # Debug/reference images
 image.png
 

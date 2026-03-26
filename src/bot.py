@@ -8,7 +8,7 @@ generates PDF(s), sends them back.
 Run:  py bot.py
 """
 
-import os, json, sys, csv
+import os, json, sys, csv, logging
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -17,7 +17,7 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
     sys.exit("TELEGRAM_BOT_TOKEN not set in .env")
 
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, BotCommand
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     ConversationHandler, ContextTypes, filters,
@@ -27,9 +27,10 @@ from telegram.ext import (
 import fitz
 from generate import (
     ensure_fonts, split_address, fill_page1, fill_page2,
-    fill_page_header_only, increment_policy,
+    fill_page_header_only, increment_policy, scannify_pdf,
+    generate_utility,
     PROJECT_DIR, OUTPUT_DIR, TEMPLATE_PDF,
-    FONT_REG, FONT_BOLD,
+    FONT_REG, FONT_BOLD, logger,
 )
 
 # ─── COMPANY DATABASE ────────────────────────────────────────────────────────
@@ -53,6 +54,7 @@ def load_companies_db():
                 "address": row.get("Physical Address", "").strip(),
             })
     print(f"  Loaded {len(COMPANIES_DB)} companies from {ALL_COMPANIES_FILE.name}")
+    logger.info(f"Loaded {len(COMPANIES_DB)} companies from {ALL_COMPANIES_FILE.name}")
 
 def search_companies(query: str, max_results: int = 10):
     """Case-insensitive partial match on company name."""
@@ -85,7 +87,8 @@ def save_policy(policy: str):
 
 # ─── CONVERSATION STATES ───────────────────────────────────────────────────────
 
-ASK_NAME, ASK_PICK, ASK_USDOT, ASK_ADDR, ASK_MORE = range(5)
+ASK_NAME, ASK_PICK, ASK_USDOT, ASK_ADDR, ASK_MORE, ASK_SCAN = range(6)
+UT_NAME, UT_PICK, UT_ADDR, UT_SCAN = range(10, 14)
 
 YES_NO = ReplyKeyboardMarkup([["Yes", "No"]], one_time_keyboard=True, resize_keyboard=True)
 
@@ -130,7 +133,9 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Cover Whale PDF Generator\n\n"
         "Commands:\n"
-        "  /new — generate a PDF\n"
+        "  /new — generate a policy PDF\n"
+        "  /utility — generate a utility bill\n"
+        "  /scan — scan any PDF (or just send a PDF)\n"
         "  /policy — view current policy number\n"
         "  /setpolicy CUS09116674 — override policy number"
     )
@@ -156,12 +161,15 @@ async def cmd_new(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def got_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.message.text.strip()
+    user = update.effective_user.first_name
+    logger.info(f"[{user}] Search: \"{query}\"")
     results = search_companies(query)
 
     if len(results) == 1:
         # Exact single match — auto-fill
         co = results[0]
         n = add_company(ctx, co)
+        logger.info(f"[{user}] Match: {co['name']} (USDOT: {co['usdot']})")
         await update.message.reply_text(
             f"Found: {co['name']}\n"
             f"USDOT: {co['usdot']}\n"
@@ -173,6 +181,7 @@ async def got_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif len(results) > 1:
         # Multiple matches — let user pick
+        logger.info(f"[{user}] Multiple matches: {len(results)} results")
         ctx.user_data["search_results"] = results
         lines = [f"{i+1}. {co['name']}" for i, co in enumerate(results)]
         buttons = [[str(i+1)] for i in range(len(results))]
@@ -186,6 +195,7 @@ async def got_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     else:
         # No match — manual entry
+        logger.info(f"[{user}] No match — manual entry")
         ctx.user_data["current"] = {"name": query}
         await update.message.reply_text(
             f"No match found for \"{query}\".\n"
@@ -262,28 +272,233 @@ async def got_more_no(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     policy = load_policy()
     errors = []
+    generated_paths = []
 
     for co in companies:
         try:
+            logger.info(f"Bot PDF: {co['name']} | Policy: {policy} | USDOT: {co['usdot']}")
             path = make_pdf(co["name"], co["usdot"], co["address"], policy)
+            generated_paths.append(path)
             with open(path, "rb") as f:
                 await update.message.reply_document(
                     document=f,
                     filename=path.name,
-                    caption=f"{co['name']} — {policy}"
+                    caption=f"{co['name']} — {policy}",
+                    read_timeout=60,
+                    write_timeout=60,
+                    connect_timeout=60,
                 )
             policy = increment_policy(policy)
         except Exception as e:
+            logger.error(f"Bot PDF failed: {co['name']} — {e}")
             errors.append(f"{co['name']}: {e}")
 
     save_policy(policy)
 
     if errors:
         await update.message.reply_text("Errors:\n" + "\n".join(errors))
-    else:
-        await update.message.reply_text(f"Done! Next policy will be: {policy}")
 
+    # Store generated paths for potential scan step
+    ctx.user_data["generated_paths"] = generated_paths
+
+    if generated_paths:
+        await update.message.reply_text(
+            f"Done! Next policy will be: {policy}\n\n"
+            "Want a scanned version of the PDF(s)?",
+            reply_markup=YES_NO
+        )
+        return ASK_SCAN
+    else:
+        return ConversationHandler.END
+
+
+async def got_scan_yes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    paths = ctx.user_data.get("generated_paths", [])
+    if not paths:
+        await update.message.reply_text("No PDFs to scan.", reply_markup=ReplyKeyboardRemove())
+        return ConversationHandler.END
+
+    await update.message.reply_text(
+        f"Creating scanned version(s)...",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+    for path in paths:
+        try:
+            jpg_paths = scannify_pdf(path, prefix="insurance page")
+            for jpg_path in jpg_paths:
+                with open(jpg_path, "rb") as f:
+                    await update.message.reply_document(
+                        document=f,
+                        filename=jpg_path.name,
+                        read_timeout=60,
+                        write_timeout=60,
+                        connect_timeout=60,
+                    )
+        except Exception as e:
+            logger.error(f"Scan effect failed: {path.name} — {e}")
+            await update.message.reply_text(f"Error scanning {path.name}: {e}")
+
+    await update.message.reply_text("Done!")
     return ConversationHandler.END
+
+
+async def got_scan_no(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("All done!", reply_markup=ReplyKeyboardRemove())
+    return ConversationHandler.END
+
+# ─── UTILITY BILL HANDLERS ───────────────────────────────────────────────────
+
+async def cmd_utility(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Utility bill generator\n\nCompany name?",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return UT_NAME
+
+async def _ut_generate_and_send(update, ctx, company, address):
+    """Shared helper: generate utility bill, send it, ask about scan."""
+    await update.message.reply_text("Generating utility bill...", reply_markup=ReplyKeyboardRemove())
+    try:
+        path = generate_utility(company, address)
+        ctx.user_data["generated_paths"] = [path]
+        with open(path, "rb") as f:
+            await update.message.reply_document(
+                document=f,
+                filename=path.name,
+                caption=f"Utility bill — {company.upper()}",
+                read_timeout=60, write_timeout=60, connect_timeout=60,
+            )
+        logger.info(f"Utility bill sent: {company} | {address}")
+        await update.message.reply_text("Want a scanned version?", reply_markup=YES_NO)
+        return UT_SCAN
+    except Exception as e:
+        logger.error(f"Utility bill failed: {company} — {e}")
+        await update.message.reply_text(f"Error: {e}")
+        return ConversationHandler.END
+
+async def got_ut_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.message.text.strip()
+    user = update.effective_user.first_name
+    logger.info(f"[{user}] Utility search: \"{query}\"")
+    results = search_companies(query)
+
+    if len(results) == 1:
+        co = results[0]
+        logger.info(f"[{user}] Utility match: {co['name']}")
+        return await _ut_generate_and_send(update, ctx, co["name"], co["address"])
+
+    elif len(results) > 1:
+        logger.info(f"[{user}] Utility multiple matches: {len(results)}")
+        ctx.user_data["ut_search_results"] = results
+        lines = [f"{i+1}. {co['name']}" for i, co in enumerate(results)]
+        buttons = [[str(i+1)] for i in range(len(results))]
+        buttons.append(["None of these"])
+        await update.message.reply_text(
+            f"Found {len(results)} matches:\n\n" + "\n".join(lines) +
+            "\n\nPick a number, or 'None of these' for manual entry.",
+            reply_markup=ReplyKeyboardMarkup(buttons, one_time_keyboard=True, resize_keyboard=True)
+        )
+        return UT_PICK
+
+    else:
+        logger.info(f"[{user}] Utility no match — manual entry")
+        ctx.user_data["ut_company"] = query
+        await update.message.reply_text(
+            f"No match found for \"{query}\".\n\nEnter the address:"
+        )
+        return UT_ADDR
+
+async def got_ut_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+
+    if text.lower() == "none of these":
+        await update.message.reply_text(
+            "Enter the company name for manual entry:",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return UT_NAME
+
+    results = ctx.user_data.get("ut_search_results", [])
+    try:
+        idx = int(text) - 1
+        if 0 <= idx < len(results):
+            co = results[idx]
+            return await _ut_generate_and_send(update, ctx, co["name"], co["address"])
+    except ValueError:
+        pass
+
+    await update.message.reply_text("Invalid choice. Pick a number from the list, or 'None of these'.")
+    return UT_PICK
+
+async def got_ut_addr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    company = ctx.user_data["ut_company"]
+    address = update.message.text.strip()
+    return await _ut_generate_and_send(update, ctx, company, address)
+
+async def got_ut_scan_yes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    paths = ctx.user_data.get("generated_paths", [])
+    if not paths:
+        await update.message.reply_text("No PDFs to scan.", reply_markup=ReplyKeyboardRemove())
+        return ConversationHandler.END
+    await update.message.reply_text("Creating scanned version...", reply_markup=ReplyKeyboardRemove())
+    for path in paths:
+        try:
+            jpg_paths = scannify_pdf(path, prefix="utility page")
+            for jpg_path in jpg_paths:
+                with open(jpg_path, "rb") as f:
+                    await update.message.reply_document(
+                        document=f, filename=jpg_path.name,
+                        read_timeout=60, write_timeout=60, connect_timeout=60,
+                    )
+        except Exception as e:
+            await update.message.reply_text(f"Error scanning: {e}")
+    await update.message.reply_text("Done!")
+    return ConversationHandler.END
+
+async def got_ut_scan_no(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("All done!", reply_markup=ReplyKeyboardRemove())
+    return ConversationHandler.END
+
+# ─── SCAN ANY PDF ─────────────────────────────────────────────────────────────
+
+async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Send me a PDF file and I'll create a scanned version.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+async def handle_pdf_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    doc = update.message.document
+    if not doc.file_name.lower().endswith(".pdf"):
+        await update.message.reply_text("Please send a PDF file.")
+        return
+
+    await update.message.reply_text("Creating scanned version...")
+
+    try:
+        file = await doc.get_file()
+        pdf_path = OUTPUT_DIR / doc.file_name
+        OUTPUT_DIR.mkdir(exist_ok=True)
+        await file.download_to_drive(str(pdf_path))
+
+        stem = pdf_path.stem
+        jpg_paths = scannify_pdf(pdf_path, prefix=f"{stem} page")
+
+        for jpg_path in jpg_paths:
+            with open(jpg_path, "rb") as f:
+                await update.message.reply_document(
+                    document=f, filename=jpg_path.name,
+                    read_timeout=60, write_timeout=60, connect_timeout=60,
+                )
+
+        logger.info(f"Scanned PDF: {doc.file_name} -> {len(jpg_paths)} pages")
+        await update.message.reply_text("Done!")
+    except Exception as e:
+        logger.error(f"Scan PDF failed: {doc.file_name} — {e}")
+        await update.message.reply_text(f"Error: {e}")
+
+# ─── GENERAL ──────────────────────────────────────────────────────────────────
 
 async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Cancelled.", reply_markup=ReplyKeyboardRemove())
@@ -295,7 +510,10 @@ def main():
     ensure_fonts()
     load_companies_db()
 
-    app = Application.builder().token(TOKEN).build()
+    from telegram.ext import Defaults
+    from telegram.request import HTTPXRequest
+    request = HTTPXRequest(read_timeout=60, write_timeout=60, connect_timeout=60)
+    app = Application.builder().token(TOKEN).request(request).build()
 
     conv = ConversationHandler(
         entry_points=[CommandHandler("new", cmd_new)],
@@ -308,15 +526,48 @@ def main():
                 MessageHandler(filters.Regex(r"(?i)^yes$"), got_more_yes),
                 MessageHandler(filters.Regex(r"(?i)^no$"),  got_more_no),
             ],
+            ASK_SCAN:  [
+                MessageHandler(filters.Regex(r"(?i)^yes$"), got_scan_yes),
+                MessageHandler(filters.Regex(r"(?i)^no$"),  got_scan_no),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+    )
+
+    util_conv = ConversationHandler(
+        entry_points=[CommandHandler("utility", cmd_utility)],
+        states={
+            UT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_ut_name)],
+            UT_PICK: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_ut_pick)],
+            UT_ADDR: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_ut_addr)],
+            UT_SCAN: [
+                MessageHandler(filters.Regex(r"(?i)^yes$"), got_ut_scan_yes),
+                MessageHandler(filters.Regex(r"(?i)^no$"),  got_ut_scan_no),
+            ],
         },
         fallbacks=[CommandHandler("cancel", cmd_cancel)],
     )
 
     app.add_handler(CommandHandler("start",     cmd_start))
+    app.add_handler(CommandHandler("scan",      cmd_scan))
     app.add_handler(CommandHandler("policy",    cmd_policy))
     app.add_handler(CommandHandler("setpolicy", cmd_setpolicy))
     app.add_handler(conv)
+    app.add_handler(util_conv)
+    app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf_file))
 
+    async def post_init(application):
+        await application.bot.set_my_commands([
+            BotCommand("new",       "Generate a policy PDF"),
+            BotCommand("utility",   "Generate a utility bill"),
+            BotCommand("scan",      "Scan any PDF document"),
+            BotCommand("policy",    "View current policy number"),
+            BotCommand("setpolicy", "Override policy number"),
+            BotCommand("cancel",    "Cancel current operation"),
+        ])
+
+    app.post_init = post_init
+    logger.info("Bot started")
     print("Bot running...")
     app.run_polling()
 

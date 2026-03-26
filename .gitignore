@@ -16,6 +16,9 @@ assets/
 
 .claude
 
+# Logs
+log/
+
 # Debug/reference images
 image.png
 

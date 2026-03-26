@@ -10,10 +10,24 @@ Run:  py generate.py
 
 import fitz
 import openpyxl
-import os, sys, urllib.request, zipfile, io
+import os, sys, urllib.request, zipfile, io, logging, random
 from pathlib import Path
+from PIL import Image, ImageFilter, ImageEnhance
+import numpy as np
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+# ─── LOGGING ─────────────────────────────────────────────────────────────────
+
+LOG_DIR = Path(__file__).parent.parent / "log"
+LOG_DIR.mkdir(exist_ok=True)
+
+logger = logging.getLogger("coverwhale")
+if not logger.handlers:
+    logger.setLevel(logging.INFO)
+    fh = logging.FileHandler(LOG_DIR / "coverwhale.log", encoding="utf-8")
+    fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+    logger.addHandler(fh)
 
 # ─── CONFIG ──────────────────────────────────────────────────────────────────
 
@@ -28,6 +42,16 @@ STARTING_POLICY = "CUS09116674"
 FONT_REG  = ASSETS_DIR / "DejaVuSansCondensed.ttf"
 FONT_BOLD = ASSETS_DIR / "DejaVuSansCondensed-Bold.ttf"
 FONT_ZIP  = "https://sourceforge.net/projects/dejavu/files/dejavu/2.37/dejavu-fonts-ttf-2.37.zip/download"
+
+# Arial fonts (Windows system)
+ARIAL_REG  = Path("C:/Windows/Fonts/arial.ttf")
+ARIAL_BOLD = Path("C:/Windows/Fonts/arialbd.ttf")
+
+# ─── UTILITY BILL CONFIG ─────────────────────────────────────────────────────
+UTILITY_TEMPLATE = ASSETS_DIR / "template" / "Utility_IVORY JULIUS CHRISTOPHER.pdf"
+UT_NAME    = "IVORY JULIUS CHRISTOPHER"
+UT_ADDR1   = "10318 CHEEVES,"
+UT_ADDR2   = "HOUSTON, TX 77016"
 
 # ─── TEMPLATE VALUES (VIATIC LLC base PDF) ───────────────────────────────────
 T_COMPANY = "VIATIC LLC"
@@ -136,11 +160,12 @@ def replace_on_page(page, old_text, new_text, pix=None,
                     top_right_x=None,
                     x_min=None, x_max=None,
                     y_min=None, y_max=None,
-                    color=None):
+                    color=None,
+                    font_reg=None, font_bold=None):
     """
     Find every occurrence of old_text on page that passes the x/y filters,
     cover it with a filled rectangle matching the background, then write
-    new_text in DejaVu at the correct position.
+    new_text at the correct position.
     Uses draw_rect instead of redaction annotations to avoid corrupting
     adjacent content in the PDF stream.
     """
@@ -165,7 +190,9 @@ def replace_on_page(page, old_text, new_text, pix=None,
             sz, use_bold, use_center = fontsize, bold, center
 
         # ── x alignment ──────────────────────────────────────────────────────
-        fp       = str(FONT_BOLD if use_bold else FONT_REG)
+        f_reg  = font_reg  or FONT_REG
+        f_bold = font_bold or FONT_BOLD
+        fp       = str(f_bold if use_bold else f_reg)
         font_obj = fitz.Font(fontfile=fp)
         tw       = font_obj.text_length(new_text, fontsize=sz)
 
@@ -206,7 +233,10 @@ def replace_on_page(page, old_text, new_text, pix=None,
         page.draw_rect(cover, color=bg, fill=bg, width=0)
 
         # ── write new text on top ─────────────────────────────────────────────
-        fnm = "DejaVuSCBd" if use_bold else "DejaVuSC"
+        if font_reg is not None:
+            fnm = "ArialBd" if use_bold else "Arial"
+        else:
+            fnm = "DejaVuSCBd" if use_bold else "DejaVuSC"
         text_color = color if color is not None else (0, 0, 0)
         page.insert_text((x, y), new_text, fontfile=fp, fontname=fnm, fontsize=sz, color=text_color)
 
@@ -299,12 +329,159 @@ def fill_page_header_only(page, company, policy, pix):
     replace_on_page(page, T_COMPANY, company,
                     fontsize=7.36, top_right_x=569.0, pix=pix, x_min=400, y_max=80, color=CLR_HEADER)
 
+# ─── UTILITY BILL FILL ────────────────────────────────────────────────────────
+
+def fill_utility(page, company, addr1, addr2, pix):
+    """
+    Replace company name and address on page 1 of the Comcast utility template.
+    Two locations: upper-left header area and bottom payment slip.
+    """
+    ar = dict(font_reg=ARIAL_REG, font_bold=ARIAL_BOLD)
+
+    # Upper-left: bold company name (size 12)
+    replace_on_page(page, UT_NAME, company,
+                    fontsize=12.0, bold=True, pix=pix,
+                    y_min=110, y_max=145, x_max=300, **ar)
+
+    # Upper-left: address lines (size 9)
+    replace_on_page(page, UT_ADDR1, addr1,
+                    fontsize=9.0, pix=pix,
+                    y_min=155, y_max=180, x_max=200, **ar)
+    replace_on_page(page, UT_ADDR2, addr2,
+                    fontsize=9.0, pix=pix,
+                    y_min=170, y_max=195, x_max=200, **ar)
+
+    # Bottom payment slip: company name (size 9, regular)
+    replace_on_page(page, UT_NAME, company,
+                    fontsize=9.0, pix=pix,
+                    y_min=625, y_max=650, x_max=200, **ar)
+
+    # Bottom payment slip: address lines (size 9)
+    replace_on_page(page, UT_ADDR1, addr1,
+                    fontsize=9.0, pix=pix,
+                    y_min=640, y_max=660, x_max=200, **ar)
+    replace_on_page(page, UT_ADDR2, addr2,
+                    fontsize=9.0, pix=pix,
+                    y_min=650, y_max=670, x_max=200, **ar)
+
+
+def generate_utility(company: str, address: str, output_dir: Path = None) -> Path:
+    """Generate a Comcast utility bill PDF with the given company name and address."""
+    if output_dir is None:
+        output_dir = OUTPUT_DIR
+    output_dir.mkdir(exist_ok=True)
+
+    addr1, addr2 = split_address(address.upper())
+    company_up = company.strip().upper()
+
+    doc = fitz.open(UTILITY_TEMPLATE)
+    page = doc[0]
+    pix = page.get_pixmap(dpi=72)
+    fill_utility(page, company_up, addr1, addr2, pix)
+
+    safe = (company_up
+            .replace("/","-").replace("\\","-").replace(":","")
+            .replace("*","").replace("?","").replace('"',"")
+            .replace("<","").replace(">","").replace("|","")
+            .replace("'",""))
+    out = output_dir / f"Utility_{safe}.pdf"
+    doc.save(str(out), garbage=4, deflate=True)
+    doc.close()
+    logger.info(f"Utility bill saved: {out.name}")
+    return out
+
+
+# ─── SCAN EFFECT ──────────────────────────────────────────────────────────────
+
+def scannify_pdf(input_path: Path, output_dir: Path = None, dpi: int = 250, prefix: str = "page") -> list[Path]:
+    """
+    Take a clean PDF and produce JPG images (first 3 pages only)
+    that look like photos/scans of a printed document.
+    Returns list of JPG paths.
+    """
+    if output_dir is None:
+        output_dir = input_path.parent
+
+    doc = fitz.open(input_path)
+    stem = input_path.stem
+    jpg_paths = []
+    num_pages = min(3, len(doc))
+
+    for page_num in range(num_pages):
+        page = doc[page_num]
+        pix = page.get_pixmap(dpi=dpi)
+        img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        w, h = img.size
+
+        # 1. Gray/warm paper tint — blend toward scanner-gray
+        paper = Image.new("RGB", img.size, (235, 232, 225))
+        img = Image.blend(img, paper, alpha=0.12)
+
+        # 2. Reduce contrast & brightness (washed out / printed look)
+        img = ImageEnhance.Contrast(img).enhance(0.82)
+        img = ImageEnhance.Brightness(img).enhance(0.93)
+        img = ImageEnhance.Sharpness(img).enhance(0.7)
+
+        # 3. Gaussian noise (scanner grain)
+        arr = np.array(img, dtype=np.int16)
+        noise = np.random.normal(0, 4.5, arr.shape).astype(np.int16)
+        arr = np.clip(arr + noise, 0, 255).astype(np.uint8)
+        img = Image.fromarray(arr)
+
+        # 4. Blur (scanner/camera softness)
+        img = img.filter(ImageFilter.GaussianBlur(radius=0.7))
+
+        # 5. Slight rotation (paper not aligned perfectly)
+        angle = random.uniform(-0.7, 0.7)
+        img = img.rotate(angle, resample=Image.BICUBIC, expand=False,
+                         fillcolor=(230, 228, 222))
+
+        # 6. Subtle edge shadow (very light, not a frame)
+        shadow = np.ones((h, w), dtype=np.float32)
+        margin_x = int(w * 0.03)
+        margin_y = int(h * 0.025)
+
+        for i in range(margin_x):
+            f = (i / margin_x) ** 0.8
+            shadow[:, i] *= (0.88 + 0.12 * f)
+            shadow[:, w - 1 - i] *= (0.90 + 0.10 * f)
+        for i in range(margin_y):
+            f = (i / margin_y) ** 0.8
+            shadow[i, :] *= (0.92 + 0.08 * f)
+            shadow[h - 1 - i, :] *= (0.88 + 0.12 * f)
+
+        img_arr = np.array(img, dtype=np.float32)
+        for c in range(3):
+            img_arr[:, :, c] *= shadow
+        img = Image.fromarray(np.clip(img_arr, 0, 255).astype(np.uint8))
+
+        # 7. Slight color temperature shift (warm/yellowish like old scanner)
+        r, g, b = img.split()
+        r = ImageEnhance.Brightness(r.convert("L").convert("RGB")).enhance(1.02)
+        # simpler: just adjust channels via numpy
+        final_arr = np.array(img, dtype=np.int16)
+        final_arr[:, :, 0] = np.clip(final_arr[:, :, 0] + 3, 0, 255)   # slight red boost
+        final_arr[:, :, 2] = np.clip(final_arr[:, :, 2] - 4, 0, 255)   # slight blue drop
+        img = Image.fromarray(final_arr.astype(np.uint8))
+
+        # Save as JPG
+        jpg_path = output_dir / f"{prefix} {page_num + 1}.jpg"
+        img.save(str(jpg_path), "JPEG", quality=88)
+        jpg_paths.append(jpg_path)
+
+    doc.close()
+    logger.info(f"Scanned JPGs saved: {[p.name for p in jpg_paths]}")
+    return jpg_paths
+
+
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 
 def generate():
     print("\n" + "=" * 57)
     print("  Cover Whale PDF Generator  v3")
     print("=" * 57)
+    logger.info("=" * 40)
+    logger.info("Batch generation started")
 
     print("\n[1/3] Fonts ...")
     ensure_fonts()
@@ -360,6 +537,7 @@ def generate():
         print(f"        USDOT  : {usdot}")
         print(f"        Street : {addr1}")
         print(f"        City   : {addr2}")
+        logger.info(f"Generating [{count+1:02d}] {company} | Policy: {policy} | USDOT: {usdot}")
 
         try:
             doc = fitz.open(TEMPLATE_PDF)
@@ -390,6 +568,7 @@ def generate():
             doc.save(str(out), garbage=4, deflate=True)
             doc.close()
             print(f"        Saved  -> {out.name}")
+            logger.info(f"Saved: {out.name}")
 
             policy = increment_policy(policy)
             count += 1
@@ -398,6 +577,7 @@ def generate():
             import traceback
             errors.append((company, str(e)))
             print(f"        ERROR: {e}")
+            logger.error(f"Failed: {company} — {e}")
             traceback.print_exc()
 
     print("\n" + "=" * 57)
@@ -407,6 +587,7 @@ def generate():
         for n, e in errors:
             print(f"    * {n}: {e}")
     print("=" * 57 + "\n")
+    logger.info(f"Batch complete: {count} PDFs, {len(errors)} errors")
 
 
 if __name__ == "__main__":

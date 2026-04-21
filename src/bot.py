@@ -325,7 +325,7 @@ async def got_scan_yes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     for path in paths:
         try:
-            jpg_paths = scannify_pdf(path, prefix="insurance page")
+            jpg_paths = scannify_pdf(path)
             for jpg_path in jpg_paths:
                 with open(jpg_path, "rb") as f:
                     await update.message.reply_document(
@@ -444,7 +444,7 @@ async def got_ut_scan_yes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Creating scanned version...", reply_markup=ReplyKeyboardRemove())
     for path in paths:
         try:
-            jpg_paths = scannify_pdf(path, prefix="utility page")
+            jpg_paths = scannify_pdf(path)
             for jpg_path in jpg_paths:
                 with open(jpg_path, "rb") as f:
                     await update.message.reply_document(
@@ -482,8 +482,7 @@ async def handle_pdf_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         OUTPUT_DIR.mkdir(exist_ok=True)
         await file.download_to_drive(str(pdf_path))
 
-        stem = pdf_path.stem
-        jpg_paths = scannify_pdf(pdf_path, prefix=f"{stem} page")
+        jpg_paths = scannify_pdf(pdf_path)
 
         for jpg_path in jpg_paths:
             with open(jpg_path, "rb") as f:

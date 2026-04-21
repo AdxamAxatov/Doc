@@ -11,6 +11,7 @@ Run:  py generate.py
 import fitz
 import openpyxl
 import os, sys, urllib.request, zipfile, io, logging, random
+from datetime import datetime
 from pathlib import Path
 from PIL import Image, ImageFilter, ImageEnhance
 import numpy as np
@@ -393,17 +394,17 @@ def generate_utility(company: str, address: str, output_dir: Path = None) -> Pat
 
 # ─── SCAN EFFECT ──────────────────────────────────────────────────────────────
 
-def scannify_pdf(input_path: Path, output_dir: Path = None, dpi: int = 250, prefix: str = "page") -> list[Path]:
+def scannify_pdf(input_path: Path, output_dir: Path = None, dpi: int = 250) -> list[Path]:
     """
     Take a clean PDF and produce JPG images (first 3 pages only)
     that look like photos/scans of a printed document.
-    Returns list of JPG paths.
+    Files are named with the local-time timestamp MMDDYYYYHHMMSS captured
+    per page at save time. Returns list of JPG paths.
     """
     if output_dir is None:
         output_dir = input_path.parent
 
     doc = fitz.open(input_path)
-    stem = input_path.stem
     jpg_paths = []
     num_pages = min(3, len(doc))
 
@@ -464,8 +465,14 @@ def scannify_pdf(input_path: Path, output_dir: Path = None, dpi: int = 250, pref
         final_arr[:, :, 2] = np.clip(final_arr[:, :, 2] - 4, 0, 255)   # slight blue drop
         img = Image.fromarray(final_arr.astype(np.uint8))
 
-        # Save as JPG
-        jpg_path = output_dir / f"{prefix} {page_num + 1}.jpg"
+        # Save as JPG — filename is local-time MMDDYYYYHHMMSS, captured per page.
+        # If two pages land in the same second, append _2, _3, ... to avoid overwrite.
+        stamp = datetime.now().strftime("%m%d%Y%H%M%S")
+        jpg_path = output_dir / f"{stamp}.jpg"
+        dup = 2
+        while jpg_path.exists():
+            jpg_path = output_dir / f"{stamp}_{dup}.jpg"
+            dup += 1
         img.save(str(jpg_path), "JPEG", quality=88)
         jpg_paths.append(jpg_path)
 

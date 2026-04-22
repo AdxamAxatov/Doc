@@ -414,56 +414,33 @@ def scannify_pdf(input_path: Path, output_dir: Path = None, dpi: int = 250) -> l
         img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
         w, h = img.size
 
-        # 1. Gray/warm paper tint — blend toward scanner-gray
-        paper = Image.new("RGB", img.size, (235, 232, 225))
-        img = Image.blend(img, paper, alpha=0.12)
+        # 1. Near-white paper tint (flatbed paper is white, not yellowed)
+        paper = Image.new("RGB", img.size, (248, 248, 246))
+        img = Image.blend(img, paper, alpha=0.05)
 
-        # 2. Reduce contrast & brightness (washed out / printed look)
-        img = ImageEnhance.Contrast(img).enhance(0.82)
-        img = ImageEnhance.Brightness(img).enhance(0.93)
-        img = ImageEnhance.Sharpness(img).enhance(0.7)
+        # 2. Very mild contrast/brightness tweak — keep text dark
+        img = ImageEnhance.Contrast(img).enhance(0.97)
+        img = ImageEnhance.Brightness(img).enhance(0.99)
+        img = ImageEnhance.Sharpness(img).enhance(0.85)
 
-        # 3. Gaussian noise (scanner grain)
+        # 3. Subtle ink thickening — 1-px dilation of dark strokes, blended only
+        #    where pixels are already dark so paper/photo mid-tones aren't crushed.
+        thickened = img.filter(ImageFilter.MinFilter(3))
+        orig_arr  = np.array(img,       dtype=np.float32)
+        thick_arr = np.array(thickened, dtype=np.float32)
+        lum = orig_arr.mean(axis=2)
+        text_mask = np.clip((200.0 - lum) / 120.0, 0.0, 0.35)[:, :, None]
+        blended = orig_arr * (1.0 - text_mask) + thick_arr * text_mask
+        img = Image.fromarray(np.clip(blended, 0, 255).astype(np.uint8))
+
+        # 4. Sensor grain
         arr = np.array(img, dtype=np.int16)
-        noise = np.random.normal(0, 4.5, arr.shape).astype(np.int16)
+        noise = np.random.normal(0, 3.0, arr.shape).astype(np.int16)
         arr = np.clip(arr + noise, 0, 255).astype(np.uint8)
         img = Image.fromarray(arr)
 
-        # 4. Blur (scanner/camera softness)
-        img = img.filter(ImageFilter.GaussianBlur(radius=0.7))
-
-        # 5. Slight rotation (paper not aligned perfectly)
-        angle = random.uniform(-0.7, 0.7)
-        img = img.rotate(angle, resample=Image.BICUBIC, expand=False,
-                         fillcolor=(230, 228, 222))
-
-        # 6. Subtle edge shadow (very light, not a frame)
-        shadow = np.ones((h, w), dtype=np.float32)
-        margin_x = int(w * 0.03)
-        margin_y = int(h * 0.025)
-
-        for i in range(margin_x):
-            f = (i / margin_x) ** 0.8
-            shadow[:, i] *= (0.88 + 0.12 * f)
-            shadow[:, w - 1 - i] *= (0.90 + 0.10 * f)
-        for i in range(margin_y):
-            f = (i / margin_y) ** 0.8
-            shadow[i, :] *= (0.92 + 0.08 * f)
-            shadow[h - 1 - i, :] *= (0.88 + 0.12 * f)
-
-        img_arr = np.array(img, dtype=np.float32)
-        for c in range(3):
-            img_arr[:, :, c] *= shadow
-        img = Image.fromarray(np.clip(img_arr, 0, 255).astype(np.uint8))
-
-        # 7. Slight color temperature shift (warm/yellowish like old scanner)
-        r, g, b = img.split()
-        r = ImageEnhance.Brightness(r.convert("L").convert("RGB")).enhance(1.02)
-        # simpler: just adjust channels via numpy
-        final_arr = np.array(img, dtype=np.int16)
-        final_arr[:, :, 0] = np.clip(final_arr[:, :, 0] + 3, 0, 255)   # slight red boost
-        final_arr[:, :, 2] = np.clip(final_arr[:, :, 2] - 4, 0, 255)   # slight blue drop
-        img = Image.fromarray(final_arr.astype(np.uint8))
+        # 5. CIS sensor MTF falloff (soft text edges)
+        img = img.filter(ImageFilter.GaussianBlur(radius=0.5))
 
         # Save as JPG — filename is local-time MMDDYYYYHHMMSS, captured per page.
         # If two pages land in the same second, append _2, _3, ... to avoid overwrite.
@@ -473,7 +450,7 @@ def scannify_pdf(input_path: Path, output_dir: Path = None, dpi: int = 250) -> l
         while jpg_path.exists():
             jpg_path = output_dir / f"{stamp}_{dup}.jpg"
             dup += 1
-        img.save(str(jpg_path), "JPEG", quality=88)
+        img.save(str(jpg_path), "JPEG", quality=82)
         jpg_paths.append(jpg_path)
 
     doc.close()

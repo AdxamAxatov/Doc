@@ -44,9 +44,11 @@ FONT_REG  = ASSETS_DIR / "DejaVuSansCondensed.ttf"
 FONT_BOLD = ASSETS_DIR / "DejaVuSansCondensed-Bold.ttf"
 FONT_ZIP  = "https://sourceforge.net/projects/dejavu/files/dejavu/2.37/dejavu-fonts-ttf-2.37.zip/download"
 
-# Arial fonts (Windows system)
-ARIAL_REG  = Path("C:/Windows/Fonts/arial.ttf")
-ARIAL_BOLD = Path("C:/Windows/Fonts/arialbd.ttf")
+# Arial fonts — macOS system path, falling back to the Windows system path.
+_MAC_ARIAL   = Path("/System/Library/Fonts/Supplemental/Arial.ttf")
+_MAC_ARIAL_B = Path("/System/Library/Fonts/Supplemental/Arial Bold.ttf")
+ARIAL_REG  = _MAC_ARIAL   if _MAC_ARIAL.exists()   else Path("C:/Windows/Fonts/arial.ttf")
+ARIAL_BOLD = _MAC_ARIAL_B if _MAC_ARIAL_B.exists() else Path("C:/Windows/Fonts/arialbd.ttf")
 
 def _coc_dates(rng=None):
     """Dates for the Confirmation-of-Coverage doc. Start = random day in

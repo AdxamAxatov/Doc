@@ -72,6 +72,13 @@ UT_NAME    = "IVORY JULIUS CHRISTOPHER"
 UT_ADDR1   = "10318 CHEEVES,"
 UT_ADDR2   = "HOUSTON, TX 77016"
 
+# ─── CONFIRMATION OF COVERAGE CONFIG ─────────────────────────────────────────
+COC_TEMPLATE = ASSETS_DIR / "template" / "1 GUY 1 GIRL 1 TRUCK LLC new insurance.pdf"
+COC_NAME_P1  = "SAFE ROAD FREIGHT INC"        # page 1 cover-sheet sample company
+COC_NAME     = "1 GUY 1 GIRL 1 TRUCK LLC"     # pages 2 & 5 sample company
+COC_ADDR1    = "1234 N KENILWORTH AVE"        # page 2 mailing address line 1
+COC_ADDR2    = "OAK PARK, IL 60302"           # page 2 mailing address line 2
+
 # ─── TEMPLATE VALUES (VIATIC LLC base PDF) ───────────────────────────────────
 T_COMPANY = "VIATIC LLC"
 T_USDOT   = "USDOT # 3846659"
@@ -407,6 +414,61 @@ def generate_utility(company: str, address: str, output_dir: Path = None) -> Pat
     doc.save(str(out), garbage=4, deflate=True)
     doc.close()
     logger.info(f"Utility bill saved: {out.name}")
+    return out
+
+
+def generate_coc(company: str, address: str, output_dir: Path = None, dates: dict = None) -> Path:
+    """Fill the 6-page Confirmation-of-Coverage template for the given company
+    and address, with auto-generated policy dates. Output is trimmed to the
+    first 6 pages (the trailing binder pages 7-12 are dropped)."""
+    if output_dir is None:
+        output_dir = OUTPUT_DIR
+    output_dir.mkdir(exist_ok=True)
+
+    addr1, addr2 = split_address(address.upper())
+    company_up = company.strip().upper()
+    d = dates or _coc_dates()
+
+    doc = fitz.open(COC_TEMPLATE)
+
+    # Page 1 — cover sheet (different sample company) + term range
+    p = doc[0]; pix = p.get_pixmap(dpi=72)
+    replace_on_page(p, COC_NAME_P1, company_up, pix=pix)
+    replace_on_page(p, "10/16/2025", d["start_slash"], pix=pix)
+    replace_on_page(p, "10/16/2026", d["end_slash"], pix=pix)
+
+    # Page 2 — Confirmation of Coverage: insured, mailing address, date, term
+    p = doc[1]; pix = p.get_pixmap(dpi=72)
+    replace_on_page(p, COC_NAME, company_up, pix=pix)
+    replace_on_page(p, COC_ADDR1, addr1, pix=pix)
+    replace_on_page(p, COC_ADDR2, addr2, pix=pix)
+    replace_on_page(p, "10/16/2025", d["start_slash"], pix=pix)
+    replace_on_page(p, "10/16/2026", d["end_slash"], pix=pix)
+
+    # Pages 3 & 4 — date only
+    for i in (2, 3):
+        p = doc[i]; pix = p.get_pixmap(dpi=72)
+        replace_on_page(p, "10/16/2025", d["start_slash"], pix=pix)
+
+    # Page 5 — invoice: insured, term (dashes), due date (+3 weeks)
+    p = doc[4]; pix = p.get_pixmap(dpi=72)
+    replace_on_page(p, COC_NAME, company_up, pix=pix)
+    replace_on_page(p, "10-16-2025", d["start_dash"], pix=pix)
+    replace_on_page(p, "10-16-2026", d["end_dash"], pix=pix)
+    replace_on_page(p, "11/6/2025", d["due"], pix=pix)
+
+    # Page 6 — static boilerplate (no changes). Drop pages 7-12.
+    doc.select([0, 1, 2, 3, 4, 5])
+
+    safe = (company_up
+            .replace("/","-").replace("\\","-").replace(":","")
+            .replace("*","").replace("?","").replace('"',"")
+            .replace("<","").replace(">","").replace("|","")
+            .replace("'",""))
+    out = output_dir / f"COC_{safe}.pdf"
+    doc.save(str(out), garbage=4, deflate=True)
+    doc.close()
+    logger.info(f"Confirmation of Coverage saved: {out.name}")
     return out
 
 

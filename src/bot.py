@@ -28,7 +28,7 @@ import fitz
 from generate import (
     ensure_fonts, split_address, fill_page1, fill_page2,
     fill_page_header_only, increment_policy, scannify_pdf,
-    generate_utility,
+    generate_utility, generate_coc,
     PROJECT_DIR, OUTPUT_DIR, TEMPLATE_PDF,
     FONT_REG, FONT_BOLD, logger,
 )
@@ -89,6 +89,7 @@ def save_policy(policy: str):
 
 ASK_NAME, ASK_PICK, ASK_USDOT, ASK_ADDR, ASK_MORE, ASK_SCAN = range(6)
 UT_NAME, UT_PICK, UT_ADDR, UT_SCAN = range(10, 14)
+COC_NAME, COC_PICK, COC_ADDR, COC_SCAN = range(20, 24)
 
 YES_NO = ReplyKeyboardMarkup([["Yes", "No"]], one_time_keyboard=True, resize_keyboard=True)
 
@@ -135,6 +136,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Commands:\n"
         "  /new — generate a policy PDF\n"
         "  /utility — generate a utility bill\n"
+        "  /coc — generate a Confirmation of Coverage (6-page)\n"
         "  /scan — scan any PDF (or just send a PDF)\n"
         "  /policy — view current policy number\n"
         "  /setpolicy CUS09116674 — override policy number"
@@ -460,6 +462,106 @@ async def got_ut_scan_no(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("All done!", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
+# ─── CONFIRMATION OF COVERAGE HANDLERS ───────────────────────────────────────
+
+async def cmd_coc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Confirmation of Coverage generator\n\nCompany name?",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return COC_NAME
+
+async def _coc_generate_and_send(update, ctx, company, address):
+    """Shared helper: generate the CoC PDF, send it, ask about scan."""
+    await update.message.reply_text("Generating Confirmation of Coverage...", reply_markup=ReplyKeyboardRemove())
+    try:
+        path = generate_coc(company, address)
+        ctx.user_data["generated_paths"] = [path]
+        with open(path, "rb") as f:
+            await update.message.reply_document(
+                document=f, filename=path.name,
+                caption=f"Confirmation of Coverage — {company.upper()}",
+                read_timeout=60, write_timeout=60, connect_timeout=60,
+            )
+        logger.info(f"CoC sent: {company} | {address}")
+        await update.message.reply_text("Want a scanned version?", reply_markup=YES_NO)
+        return COC_SCAN
+    except Exception as e:
+        logger.error(f"CoC failed: {company} — {e}")
+        await update.message.reply_text(f"Error: {e}")
+        return ConversationHandler.END
+
+async def got_coc_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.message.text.strip()
+    user = update.effective_user.first_name
+    logger.info(f"[{user}] CoC search: \"{query}\"")
+    results = search_companies(query)
+
+    if len(results) == 1:
+        co = results[0]
+        return await _coc_generate_and_send(update, ctx, co["name"], co["address"])
+    elif len(results) > 1:
+        ctx.user_data["coc_search_results"] = results
+        lines = [f"{i+1}. {co['name']}" for i, co in enumerate(results)]
+        buttons = [[str(i+1)] for i in range(len(results))]
+        buttons.append(["None of these"])
+        await update.message.reply_text(
+            f"Found {len(results)} matches:\n\n" + "\n".join(lines) +
+            "\n\nPick a number, or 'None of these' for manual entry.",
+            reply_markup=ReplyKeyboardMarkup(buttons, one_time_keyboard=True, resize_keyboard=True)
+        )
+        return COC_PICK
+    else:
+        ctx.user_data["coc_company"] = query
+        await update.message.reply_text(f"No match found for \"{query}\".\n\nEnter the address:")
+        return COC_ADDR
+
+async def got_coc_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text.lower() == "none of these":
+        await update.message.reply_text(
+            "Enter the company name for manual entry:", reply_markup=ReplyKeyboardRemove())
+        return COC_NAME
+    results = ctx.user_data.get("coc_search_results", [])
+    try:
+        idx = int(text) - 1
+        if 0 <= idx < len(results):
+            co = results[idx]
+            return await _coc_generate_and_send(update, ctx, co["name"], co["address"])
+    except ValueError:
+        pass
+    await update.message.reply_text("Invalid choice. Pick a number from the list, or 'None of these'.")
+    return COC_PICK
+
+async def got_coc_addr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    company = ctx.user_data["coc_company"]
+    address = update.message.text.strip()
+    return await _coc_generate_and_send(update, ctx, company, address)
+
+async def got_coc_scan_yes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    paths = ctx.user_data.get("generated_paths", [])
+    if not paths:
+        await update.message.reply_text("No PDFs to scan.", reply_markup=ReplyKeyboardRemove())
+        return ConversationHandler.END
+    await update.message.reply_text("Creating scanned version...", reply_markup=ReplyKeyboardRemove())
+    for path in paths:
+        try:
+            jpg_paths = scannify_pdf(path)
+            for jpg_path in jpg_paths:
+                with open(jpg_path, "rb") as f:
+                    await update.message.reply_document(
+                        document=f, filename=jpg_path.name,
+                        read_timeout=60, write_timeout=60, connect_timeout=60,
+                    )
+        except Exception as e:
+            await update.message.reply_text(f"Error scanning: {e}")
+    await update.message.reply_text("Done!")
+    return ConversationHandler.END
+
+async def got_coc_scan_no(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("All done!", reply_markup=ReplyKeyboardRemove())
+    return ConversationHandler.END
+
 # ─── SCAN ANY PDF ─────────────────────────────────────────────────────────────
 
 async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -547,18 +649,34 @@ def main():
         fallbacks=[CommandHandler("cancel", cmd_cancel)],
     )
 
+    coc_conv = ConversationHandler(
+        entry_points=[CommandHandler("coc", cmd_coc)],
+        states={
+            COC_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_coc_name)],
+            COC_PICK: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_coc_pick)],
+            COC_ADDR: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_coc_addr)],
+            COC_SCAN: [
+                MessageHandler(filters.Regex(r"(?i)^yes$"), got_coc_scan_yes),
+                MessageHandler(filters.Regex(r"(?i)^no$"),  got_coc_scan_no),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+    )
+
     app.add_handler(CommandHandler("start",     cmd_start))
     app.add_handler(CommandHandler("scan",      cmd_scan))
     app.add_handler(CommandHandler("policy",    cmd_policy))
     app.add_handler(CommandHandler("setpolicy", cmd_setpolicy))
     app.add_handler(conv)
     app.add_handler(util_conv)
+    app.add_handler(coc_conv)
     app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf_file))
 
     async def post_init(application):
         await application.bot.set_my_commands([
             BotCommand("new",       "Generate a policy PDF"),
             BotCommand("utility",   "Generate a utility bill"),
+            BotCommand("coc",       "Generate a Confirmation of Coverage"),
             BotCommand("scan",      "Scan any PDF document"),
             BotCommand("policy",    "View current policy number"),
             BotCommand("setpolicy", "Override policy number"),

@@ -27,7 +27,7 @@ from telegram.ext import (
 import fitz
 from generate import (
     ensure_fonts, split_address, fill_page1, fill_page2,
-    fill_page_header_only, increment_policy, scannify_pdf,
+    fill_page_header_only, increment_policy, scannify_pdf, scannify_to_pdf,
     generate_utility, generate_coc,
     PROJECT_DIR, OUTPUT_DIR, TEMPLATE_PDF,
     FONT_REG, FONT_BOLD, logger,
@@ -543,16 +543,15 @@ async def got_coc_scan_yes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not paths:
         await update.message.reply_text("No PDFs to scan.", reply_markup=ReplyKeyboardRemove())
         return ConversationHandler.END
-    await update.message.reply_text("Creating scanned version...", reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text("Creating scanned PDF...", reply_markup=ReplyKeyboardRemove())
     for path in paths:
         try:
-            jpg_paths = scannify_pdf(path)
-            for jpg_path in jpg_paths:
-                with open(jpg_path, "rb") as f:
-                    await update.message.reply_document(
-                        document=f, filename=jpg_path.name,
-                        read_timeout=60, write_timeout=60, connect_timeout=60,
-                    )
+            scanned = scannify_to_pdf(path)  # all 6 pages, one PDF
+            with open(scanned, "rb") as f:
+                await update.message.reply_document(
+                    document=f, filename=scanned.name,
+                    read_timeout=120, write_timeout=120, connect_timeout=120,
+                )
         except Exception as e:
             await update.message.reply_text(f"Error scanning: {e}")
     await update.message.reply_text("Done!")

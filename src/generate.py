@@ -507,6 +507,40 @@ def generate_coc(company: str, address: str, output_dir: Path = None, dates: dic
 
 # ─── SCAN EFFECT ──────────────────────────────────────────────────────────────
 
+def _scan_one(page, dpi: int):
+    """Render one PDF page and apply the photo/scan effect. Returns a PIL Image."""
+    pix = page.get_pixmap(dpi=dpi)
+    img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+
+    # 1. Near-white paper tint (flatbed paper is white, not yellowed)
+    paper = Image.new("RGB", img.size, (248, 248, 246))
+    img = Image.blend(img, paper, alpha=0.05)
+
+    # 2. Very mild contrast/brightness tweak — keep text dark
+    img = ImageEnhance.Contrast(img).enhance(0.97)
+    img = ImageEnhance.Brightness(img).enhance(0.99)
+    img = ImageEnhance.Sharpness(img).enhance(0.85)
+
+    # 3. Subtle ink thickening — 1-px dilation of dark strokes, blended only
+    #    where pixels are already dark so paper/photo mid-tones aren't crushed.
+    thickened = img.filter(ImageFilter.MinFilter(3))
+    orig_arr  = np.array(img,       dtype=np.float32)
+    thick_arr = np.array(thickened, dtype=np.float32)
+    lum = orig_arr.mean(axis=2)
+    text_mask = np.clip((200.0 - lum) / 120.0, 0.0, 0.35)[:, :, None]
+    blended = orig_arr * (1.0 - text_mask) + thick_arr * text_mask
+    img = Image.fromarray(np.clip(blended, 0, 255).astype(np.uint8))
+
+    # 4. Sensor grain
+    arr = np.array(img, dtype=np.int16)
+    noise = np.random.normal(0, 3.0, arr.shape).astype(np.int16)
+    arr = np.clip(arr + noise, 0, 255).astype(np.uint8)
+    img = Image.fromarray(arr)
+
+    # 5. CIS sensor MTF falloff (soft text edges)
+    return img.filter(ImageFilter.GaussianBlur(radius=0.5))
+
+
 def scannify_pdf(input_path: Path, output_dir: Path = None, dpi: int = 250) -> list[Path]:
     """
     Take a clean PDF and produce JPG images (first 3 pages only)
@@ -522,38 +556,7 @@ def scannify_pdf(input_path: Path, output_dir: Path = None, dpi: int = 250) -> l
     num_pages = min(3, len(doc))
 
     for page_num in range(num_pages):
-        page = doc[page_num]
-        pix = page.get_pixmap(dpi=dpi)
-        img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-        w, h = img.size
-
-        # 1. Near-white paper tint (flatbed paper is white, not yellowed)
-        paper = Image.new("RGB", img.size, (248, 248, 246))
-        img = Image.blend(img, paper, alpha=0.05)
-
-        # 2. Very mild contrast/brightness tweak — keep text dark
-        img = ImageEnhance.Contrast(img).enhance(0.97)
-        img = ImageEnhance.Brightness(img).enhance(0.99)
-        img = ImageEnhance.Sharpness(img).enhance(0.85)
-
-        # 3. Subtle ink thickening — 1-px dilation of dark strokes, blended only
-        #    where pixels are already dark so paper/photo mid-tones aren't crushed.
-        thickened = img.filter(ImageFilter.MinFilter(3))
-        orig_arr  = np.array(img,       dtype=np.float32)
-        thick_arr = np.array(thickened, dtype=np.float32)
-        lum = orig_arr.mean(axis=2)
-        text_mask = np.clip((200.0 - lum) / 120.0, 0.0, 0.35)[:, :, None]
-        blended = orig_arr * (1.0 - text_mask) + thick_arr * text_mask
-        img = Image.fromarray(np.clip(blended, 0, 255).astype(np.uint8))
-
-        # 4. Sensor grain
-        arr = np.array(img, dtype=np.int16)
-        noise = np.random.normal(0, 3.0, arr.shape).astype(np.int16)
-        arr = np.clip(arr + noise, 0, 255).astype(np.uint8)
-        img = Image.fromarray(arr)
-
-        # 5. CIS sensor MTF falloff (soft text edges)
-        img = img.filter(ImageFilter.GaussianBlur(radius=0.5))
+        img = _scan_one(doc[page_num], dpi)
 
         # Save as JPG — filename is local-time MMDDYYYYHHMMSS, captured per page.
         # If two pages land in the same second, append _2, _3, ... to avoid overwrite.
@@ -569,6 +572,31 @@ def scannify_pdf(input_path: Path, output_dir: Path = None, dpi: int = 250) -> l
     doc.close()
     logger.info(f"Scanned JPGs saved: {[p.name for p in jpg_paths]}")
     return jpg_paths
+
+
+def scannify_to_pdf(input_path: Path, output_dir: Path = None, dpi: int = 200) -> Path:
+    """Scan EVERY page of a PDF and combine them into one scanned-look PDF.
+    Each page is JPEG-compressed so the output stays small. Returns the path."""
+    if output_dir is None:
+        output_dir = input_path.parent
+
+    src = fitz.open(input_path)
+    out_doc = fitz.open()
+    for i in range(len(src)):
+        img = _scan_one(src[i], dpi)
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=85)
+        w, h = img.size
+        page = out_doc.new_page(width=w * 72.0 / dpi, height=h * 72.0 / dpi)
+        page.insert_image(page.rect, stream=buf.getvalue())
+    src.close()
+
+    stamp = datetime.now().strftime("%m%d%Y%H%M%S")
+    out = output_dir / f"{input_path.stem}_scanned_{stamp}.pdf"
+    out_doc.save(str(out), garbage=4, deflate=True)
+    out_doc.close()
+    logger.info(f"Scanned PDF saved: {out.name}")
+    return out
 
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────

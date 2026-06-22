@@ -11,7 +11,7 @@ Run:  py generate.py
 import fitz
 import openpyxl
 import os, sys, urllib.request, zipfile, io, logging, random
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from PIL import Image, ImageFilter, ImageEnhance
 import numpy as np
@@ -47,6 +47,24 @@ FONT_ZIP  = "https://sourceforge.net/projects/dejavu/files/dejavu/2.37/dejavu-fo
 # Arial fonts (Windows system)
 ARIAL_REG  = Path("C:/Windows/Fonts/arial.ttf")
 ARIAL_BOLD = Path("C:/Windows/Fonts/arialbd.ttf")
+
+def _coc_dates(rng=None):
+    """Dates for the Confirmation-of-Coverage doc. Start = random day in
+    October 2025; term end = same day October 2026; due = start + 21 days.
+    Returns the exact format strings used at each spot in the template."""
+    rng = rng or random
+    day = rng.randint(1, 31)
+    start = date(2025, 10, day)
+    end = date(2026, 10, day)
+    due = start + timedelta(days=21)
+    return {
+        "start_slash": start.strftime("%m/%d/%Y"),
+        "end_slash": end.strftime("%m/%d/%Y"),
+        "start_dash": start.strftime("%m-%d-%Y"),
+        "end_dash": end.strftime("%m-%d-%Y"),
+        "due": f"{due.month}/{due.day}/{due.year}",
+    }
+
 
 # ─── UTILITY BILL CONFIG ─────────────────────────────────────────────────────
 UTILITY_TEMPLATE = ASSETS_DIR / "template" / "Utility_IVORY JULIUS CHRISTOPHER.pdf"

@@ -79,6 +79,39 @@ COC_NAME     = "1 GUY 1 GIRL 1 TRUCK LLC"     # pages 2 & 5 sample company
 COC_ADDR1    = "1234 N KENILWORTH AVE"        # page 2 mailing address line 1
 COC_ADDR2    = "OAK PARK, IL 60302"           # page 2 mailing address line 2
 
+# Exact fonts/sizes/colors read from the template's own text spans:
+#   page 1  company = Arial-BoldMT 22pt #171717 ; date = Arial-Black 16pt #171717 (centered)
+#   pages 2-4 values = DejaVuSans 10pt black ; page 5 values = DejaVuSans 9pt black
+def _coc_font(*candidates, fallback):
+    for c in candidates:
+        if Path(c).exists():
+            return Path(c)
+    return fallback
+
+COC_FONT_BODY  = ASSETS_DIR / "DejaVuSans.ttf"  # pages 2-5 values
+COC_FONT_TITLE = _coc_font("/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+                           "C:/Windows/Fonts/arialbd.ttf", fallback=COC_FONT_BODY)
+COC_FONT_DATE1 = _coc_font("/System/Library/Fonts/Supplemental/Arial Black.ttf",
+                           "C:/Windows/Fonts/ariblk.ttf", fallback=COC_FONT_BODY)
+COC_CLR_DARK  = (0x17 / 255.0, 0x17 / 255.0, 0x17 / 255.0)  # #171717
+COC_CLR_BLACK = (0.0, 0.0, 0.0)
+
+
+def _coc_set(page, old, new, *, size, color, font, center=False):
+    """Cover the template's sample text with white and write the new value at
+    the same baseline using an exact font/size/color — no heuristics, no
+    background sampling (these fields all sit on white)."""
+    fp = str(font)
+    fobj = fitz.Font(fontfile=fp)
+    fname = "F" + str(abs(hash(fp)) % 100000)
+    for rect in page.search_for(old):
+        page.draw_rect(fitz.Rect(rect.x0 - 1, rect.y0 - 1, rect.x1 + 1, rect.y1 + 1),
+                       color=(1, 1, 1), fill=(1, 1, 1), width=0)
+        tw = fobj.text_length(new, fontsize=size)
+        x = (page.rect.width - tw) / 2 if center else rect.x0
+        y = rect.y1 - 1.0
+        page.insert_text((x, y), new, fontfile=fp, fontname=fname, fontsize=size, color=color)
+
 # ─── TEMPLATE VALUES (VIATIC LLC base PDF) ───────────────────────────────────
 T_COMPANY = "VIATIC LLC"
 T_USDOT   = "USDOT # 3846659"
@@ -431,35 +464,31 @@ def generate_coc(company: str, address: str, output_dir: Path = None, dates: dic
 
     doc = fitz.open(COC_TEMPLATE)
 
-    # Page 1 — cover sheet (different sample company) + centered term range.
-    # The range is one centered line; replace it whole so the two dates don't
-    # both center to the page middle and overlap.
-    p = doc[0]; pix = p.get_pixmap(dpi=72)
-    replace_on_page(p, COC_NAME_P1, company_up, pix=pix)
-    replace_on_page(p, "10/16/2025 - 10/16/2026",
-                    f"{d['start_slash']} - {d['end_slash']}", pix=pix)
+    # Page 1 — Arial cover, centered, #171717: company (Bold 22pt), term (Black 16pt).
+    p = doc[0]
+    _coc_set(p, COC_NAME_P1, company_up, size=22, color=COC_CLR_DARK,
+             font=COC_FONT_TITLE, center=True)
+    _coc_set(p, "10/16/2025 - 10/16/2026", f"{d['start_slash']} - {d['end_slash']}",
+             size=16, color=COC_CLR_DARK, font=COC_FONT_DATE1, center=True)
 
-    # Page 2 — Confirmation of Coverage: insured, mailing address, date, term.
-    # top_right_x pins the top-right "Date" value to its original right edge so
-    # it doesn't slide left onto the "Date:" label.
-    p = doc[1]; pix = p.get_pixmap(dpi=72)
-    replace_on_page(p, COC_NAME, company_up, pix=pix)
-    replace_on_page(p, COC_ADDR1, addr1, pix=pix)
-    replace_on_page(p, COC_ADDR2, addr2, pix=pix)
-    replace_on_page(p, "10/16/2025", d["start_slash"], pix=pix, top_right_x=575.0)
-    replace_on_page(p, "10/16/2026", d["end_slash"], pix=pix)
+    # Page 2 — Confirmation of Coverage: DejaVuSans 10pt black.
+    p = doc[1]
+    _coc_set(p, COC_NAME, company_up, size=10, color=COC_CLR_BLACK, font=COC_FONT_BODY)
+    _coc_set(p, COC_ADDR1, addr1, size=10, color=COC_CLR_BLACK, font=COC_FONT_BODY)
+    _coc_set(p, COC_ADDR2, addr2, size=10, color=COC_CLR_BLACK, font=COC_FONT_BODY)
+    _coc_set(p, "10/16/2025", d["start_slash"], size=10, color=COC_CLR_BLACK, font=COC_FONT_BODY)
+    _coc_set(p, "10/16/2026", d["end_slash"], size=10, color=COC_CLR_BLACK, font=COC_FONT_BODY)
 
-    # Pages 3 & 4 — date only
+    # Pages 3 & 4 — date only, DejaVuSans 10pt black.
     for i in (2, 3):
-        p = doc[i]; pix = p.get_pixmap(dpi=72)
-        replace_on_page(p, "10/16/2025", d["start_slash"], pix=pix)
+        _coc_set(doc[i], "10/16/2025", d["start_slash"], size=10, color=COC_CLR_BLACK, font=COC_FONT_BODY)
 
-    # Page 5 — invoice: insured, term (dashes), due date (+3 weeks)
-    p = doc[4]; pix = p.get_pixmap(dpi=72)
-    replace_on_page(p, COC_NAME, company_up, pix=pix)
-    replace_on_page(p, "10-16-2025", d["start_dash"], pix=pix)
-    replace_on_page(p, "10-16-2026", d["end_dash"], pix=pix)
-    replace_on_page(p, "11/6/2025", d["due"], pix=pix)
+    # Page 5 — invoice: DejaVuSans 9pt black. insured, term (dashes), due date (+3 weeks).
+    p = doc[4]
+    _coc_set(p, COC_NAME, company_up, size=9, color=COC_CLR_BLACK, font=COC_FONT_BODY)
+    _coc_set(p, "10-16-2025", d["start_dash"], size=9, color=COC_CLR_BLACK, font=COC_FONT_BODY)
+    _coc_set(p, "10-16-2026", d["end_dash"], size=9, color=COC_CLR_BLACK, font=COC_FONT_BODY)
+    _coc_set(p, "11/6/2025", d["due"], size=9, color=COC_CLR_BLACK, font=COC_FONT_BODY)
 
     # Page 6 — static boilerplate (no changes). Drop pages 7-12.
     doc.select([0, 1, 2, 3, 4, 5])

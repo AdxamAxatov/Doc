@@ -431,18 +431,22 @@ def generate_coc(company: str, address: str, output_dir: Path = None, dates: dic
 
     doc = fitz.open(COC_TEMPLATE)
 
-    # Page 1 — cover sheet (different sample company) + term range
+    # Page 1 — cover sheet (different sample company) + centered term range.
+    # The range is one centered line; replace it whole so the two dates don't
+    # both center to the page middle and overlap.
     p = doc[0]; pix = p.get_pixmap(dpi=72)
     replace_on_page(p, COC_NAME_P1, company_up, pix=pix)
-    replace_on_page(p, "10/16/2025", d["start_slash"], pix=pix)
-    replace_on_page(p, "10/16/2026", d["end_slash"], pix=pix)
+    replace_on_page(p, "10/16/2025 - 10/16/2026",
+                    f"{d['start_slash']} - {d['end_slash']}", pix=pix)
 
-    # Page 2 — Confirmation of Coverage: insured, mailing address, date, term
+    # Page 2 — Confirmation of Coverage: insured, mailing address, date, term.
+    # top_right_x pins the top-right "Date" value to its original right edge so
+    # it doesn't slide left onto the "Date:" label.
     p = doc[1]; pix = p.get_pixmap(dpi=72)
     replace_on_page(p, COC_NAME, company_up, pix=pix)
     replace_on_page(p, COC_ADDR1, addr1, pix=pix)
     replace_on_page(p, COC_ADDR2, addr2, pix=pix)
-    replace_on_page(p, "10/16/2025", d["start_slash"], pix=pix)
+    replace_on_page(p, "10/16/2025", d["start_slash"], pix=pix, top_right_x=575.0)
     replace_on_page(p, "10/16/2026", d["end_slash"], pix=pix)
 
     # Pages 3 & 4 — date only

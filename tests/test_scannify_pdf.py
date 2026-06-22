@@ -17,6 +17,8 @@ if not out.exists():
     sys.exit(1)
 if out.suffix.lower() != ".pdf":
     failures.append(f"output is not a .pdf: {out.name}")
+if "coc" in out.name.lower():
+    failures.append(f"scanned filename should not contain 'COC': {out.name}")
 
 sdoc = fitz.open(out)
 if len(sdoc) != 6:

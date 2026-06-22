@@ -592,7 +592,10 @@ def scannify_to_pdf(input_path: Path, output_dir: Path = None, dpi: int = 200) -
     src.close()
 
     stamp = datetime.now().strftime("%m%d%Y%H%M%S")
-    out = output_dir / f"{input_path.stem}_scanned_{stamp}.pdf"
+    base = input_path.stem
+    if base.startswith("COC_"):           # drop the doc-type prefix from the scan name
+        base = base[len("COC_"):]
+    out = output_dir / f"{base}_scanned_{stamp}.pdf"
     out_doc.save(str(out), garbage=4, deflate=True)
     out_doc.close()
     logger.info(f"Scanned PDF saved: {out.name}")

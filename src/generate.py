@@ -648,9 +648,12 @@ def fill_page6_schedule(page, street, city, state, zipc, rng, pix=None):
         _set_rect(page, _find_span(spans, 156.5, y), str(yr), size=9.6,
                   bg=_bg_at(pix, 152, y, pw, ph))
 
-    # Garage location → company address (single line, unique string).
-    replace_on_page(page, CW_OLD_GARAGE, f"{street}, {city}, {state} {zipc}",
-                    fontsize=9.6, pix=pix)
+    # Garage location → company address. Coordinate-targeted (not replace_on_page)
+    # because the bold "Garage Location:" label sits flush to the value's left, so
+    # left-sampling the bg catches a dark label glyph. Probe a blank spot at x=450.
+    _set_rect(page, _find_span(spans, 134.7, 273.1),
+              f"{street}, {city}, {state} {zipc}", size=9.6,
+              bg=_bg_at(pix, 450, 273.1, pw, ph))
 
     # Driver schedule rows (size 6.3). Coords from the template's own spans.
     # Row bg probed at x=295 (blank gap between Years-Exp and Date-of-Hire) — the

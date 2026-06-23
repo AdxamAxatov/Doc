@@ -590,15 +590,30 @@ def _find_span(spans, x0, y0, tol=2.5):
     return None
 
 
-def _set_rect(page, rect, new_text, *, size, font=FONT_REG, color=(0.0, 0.0, 0.0)):
-    """Cover a span's rect with white and write new_text at the same left
-    baseline (all these cells sit on white)."""
+def _bg_at(pix, x, y, pw, ph):
+    """Background color (0-1 floats) of one rendered point. White if no pixmap."""
+    if pix is None:
+        return (1.0, 1.0, 1.0)
+    sx, sy = pix.width / pw, pix.height / ph
+    px = max(0, min(pix.width - 1, int(x * sx)))
+    py = max(0, min(pix.height - 1, int(y * sy)))
+    try:
+        return tuple(c / 255.0 for c in pix.pixel(px, py)[:3])
+    except Exception:
+        return (1.0, 1.0, 1.0)
+
+
+def _set_rect(page, rect, new_text, *, size, font=FONT_REG, color=(0.0, 0.0, 0.0),
+              bg=(1.0, 1.0, 1.0)):
+    """Cover a span's rect with the row background color and write new_text at
+    the same left baseline. Pass bg for shaded (zebra-striped) rows so the
+    cover patch doesn't show."""
     if rect is None:
         return
     fp = str(font)
     fname = "F" + str(abs(hash(fp)) % 100000)
     page.draw_rect(fitz.Rect(rect.x0 - 1, rect.y0 - 1, rect.x1 + 1, rect.y1 + 1),
-                   color=(1, 1, 1), fill=(1, 1, 1), width=0)
+                   color=bg, fill=bg, width=0)
     page.insert_text((rect.x0, rect.y1 - 1.0), new_text,
                      fontfile=fp, fontname=fname, fontsize=size, color=color)
 
@@ -613,24 +628,34 @@ def fill_header_alt(page, old_company, old_policy, company, policy, pix):
                     x_min=400, y_max=80, color=CLR_HEADER)
 
 
-def fill_page6_schedule(page, street, city, state, zipc, rng):
+def fill_page6_schedule(page, street, city, state, zipc, rng, pix=None):
     """Page 6 — vehicle schedule (VIN + year), garage location, driver schedule
-    (names, DOB, hire date). Coordinate-targeted because years/dates repeat."""
+    (names, DOB, hire date). Coordinate-targeted because years/dates repeat.
+    The tables are zebra-striped, so each cell is covered with its row's actual
+    background color (sampled from pix at a reliably-blank probe point)."""
     spans = _page_spans(page)
+    pw, ph = page.rect.width, page.rect.height
 
-    # Vehicle VINs — each is unique, safe to text-replace. Random VIN-like strings.
+    # Vehicle VINs — unique strings. replace_on_page samples bg 4px left of the
+    # VIN (x≈44), which on this table reflects the row's stripe color correctly.
     for old_vin in CW_OLD_VINS:
-        replace_on_page(page, old_vin, _rand_vin(rng), fontsize=9.6)
+        replace_on_page(page, old_vin, _rand_vin(rng), fontsize=9.6, pix=pix)
 
     # Vehicle years (x0≈156.5) — coordinate-targeted; '2022' repeats 6× on page.
+    # Row bg sampled at x=152 (the blank gap just left of the Year column).
     year_y = [184.7, 206.8, 228.9, 251.0]
     for y, yr in zip(year_y, _rand_vehicle_years(rng, len(year_y))):
-        _set_rect(page, _find_span(spans, 156.5, y), str(yr), size=9.6)
+        _set_rect(page, _find_span(spans, 156.5, y), str(yr), size=9.6,
+                  bg=_bg_at(pix, 152, y, pw, ph))
 
     # Garage location → company address (single line, unique string).
-    replace_on_page(page, CW_OLD_GARAGE, f"{street}, {city}, {state} {zipc}", fontsize=9.6)
+    replace_on_page(page, CW_OLD_GARAGE, f"{street}, {city}, {state} {zipc}",
+                    fontsize=9.6, pix=pix)
 
     # Driver schedule rows (size 6.3). Coords from the template's own spans.
+    # Row bg probed at x=295 (blank gap between Years-Exp and Date-of-Hire) — the
+    # driver table's far-left margin stays white even on grey rows, so we must
+    # NOT sample at the left edge.
     rows = [
         dict(fn=(46.4, 494.0), ln=(89.2, 494.0),
              dob_md=(225.3, 490.3), dob_yr=(225.3, 497.8),
@@ -643,6 +668,7 @@ def fill_page6_schedule(page, street, city, state, zipc, rng):
              hire_md=(311.0, 534.2), hire_yr=(311.0, 541.7)),
     ]
     for row in rows:
+        row_bg = _bg_at(pix, 295, row["fn"][1], pw, ph)
         fn, ln = rng.choice(_FIRST_NAMES), rng.choice(_LAST_NAMES)
         dob_md, dob_yr = _rand_dob(rng)
         hire_md, hire_yr = _rand_hire(rng)
@@ -650,14 +676,16 @@ def fill_page6_schedule(page, street, city, state, zipc, rng):
                 "hire_md": hire_md, "hire_yr": hire_yr}
         for key, val in vals.items():
             x0, y0 = row[key]
-            _set_rect(page, _find_span(spans, x0, y0), val, size=6.3)
+            _set_rect(page, _find_span(spans, x0, y0), val, size=6.3, bg=row_bg)
 
 
-def fill_page7_address(page, street, city, state, zipc):
+def fill_page7_address(page, street, city, state, zipc, pix=None):
     """Page 7 — the Address / City / State / Zip row → company address."""
     spans = _page_spans(page)
+    pw, ph = page.rect.width, page.rect.height
+    row_bg = _bg_at(pix, 250, 115.6, pw, ph)   # blank gap between Address & City
     for x0, val in [(48.8, street), (327.8, city), (399.5, state), (469.2, zipc)]:
-        _set_rect(page, _find_span(spans, x0, 115.6), val.upper(), size=10.2)
+        _set_rect(page, _find_span(spans, x0, 115.6), val.upper(), size=10.2, bg=row_bg)
 
 
 def generate_coverwhale(company: str, usdot: str, address: str, policy: str,
@@ -693,11 +721,11 @@ def generate_coverwhale(company: str, usdot: str, address: str, policy: str,
 
     p = doc[5]; pix = p.get_pixmap(dpi=72)          # page 6 — DEKS header + schedule
     fill_header_alt(p, ALT_COMPANY_REST, ALT_POLICY, company_up, policy, pix)
-    fill_page6_schedule(p, street, city, state, zipc, rng)
+    fill_page6_schedule(p, street, city, state, zipc, rng, pix)
 
     p = doc[6]; pix = p.get_pixmap(dpi=72)          # page 7 — DEKS header + address
     fill_header_alt(p, ALT_COMPANY_REST, ALT_POLICY, company_up, policy, pix)
-    fill_page7_address(p, street, city, state, zipc)
+    fill_page7_address(p, street, city, state, zipc, pix)
 
     for i in (7, 8):                                # pages 8 & 9 — DEKS header only
         p = doc[i]; pix = p.get_pixmap(dpi=72)

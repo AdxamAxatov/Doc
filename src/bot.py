@@ -90,6 +90,7 @@ def save_policy(policy: str):
 ASK_NAME, ASK_PICK, ASK_USDOT, ASK_ADDR, ASK_MORE, ASK_SCAN = range(6)
 UT_NAME, UT_PICK, UT_ADDR, UT_SCAN = range(10, 14)
 COC_NAME, COC_PICK, COC_ADDR, COC_SCAN = range(20, 24)
+CW_NAME, CW_PICK, CW_USDOT, CW_ADDR, CW_SCAN = range(30, 35)
 
 YES_NO = ReplyKeyboardMarkup([["Yes", "No"]], one_time_keyboard=True, resize_keyboard=True)
 
@@ -135,6 +136,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Cover Whale PDF Generator\n\n"
         "Commands:\n"
         "  /new — generate a policy PDF\n"
+        "  /coverwhale — full Cover Whale policy + full scanned PDF\n"
         "  /utility — generate a utility bill\n"
         "  /coc — generate a Confirmation of Coverage (6-page)\n"
         "  /scan — scan any PDF (or just send a PDF)\n"
@@ -561,6 +563,117 @@ async def got_coc_scan_no(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("All done!", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
+# ─── COVER WHALE FULL POLICY HANDLERS ────────────────────────────────────────
+# Like /new but single-company, outputs the WHOLE filled policy PDF and a
+# scanned version of the WHOLE document (every page, one PDF) — not just the
+# first 3 pages. Reuses make_pdf() (all calibrated text sizes) + the policy
+# counter, and scannify_to_pdf() for the full-document scan.
+
+async def cmd_coverwhale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Cover Whale policy generator (full document)\n\nCompany name?",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return CW_NAME
+
+async def _cw_generate_and_send(update, ctx, company, usdot, address):
+    """Shared helper: generate the full Cover Whale policy, send it, ask about scan."""
+    await update.message.reply_text("Generating Cover Whale policy...", reply_markup=ReplyKeyboardRemove())
+    try:
+        policy = load_policy()
+        path = make_pdf(company, usdot, address, policy)
+        ctx.user_data["generated_paths"] = [path]
+        with open(path, "rb") as f:
+            await update.message.reply_document(
+                document=f, filename=path.name,
+                caption=f"Cover Whale — {company.upper()} — {policy}",
+                read_timeout=60, write_timeout=60, connect_timeout=60,
+            )
+        save_policy(increment_policy(policy))
+        logger.info(f"Cover Whale sent: {company} | {policy} | USDOT: {usdot}")
+        await update.message.reply_text("Want a scanned version (full document)?", reply_markup=YES_NO)
+        return CW_SCAN
+    except Exception as e:
+        logger.error(f"Cover Whale failed: {company} — {e}")
+        await update.message.reply_text(f"Error: {e}")
+        return ConversationHandler.END
+
+async def got_cw_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.message.text.strip()
+    user = update.effective_user.first_name
+    logger.info(f"[{user}] Cover Whale search: \"{query}\"")
+    results = search_companies(query)
+
+    if len(results) == 1:
+        co = results[0]
+        return await _cw_generate_and_send(update, ctx, co["name"], co["usdot"], co["address"])
+    elif len(results) > 1:
+        ctx.user_data["cw_search_results"] = results
+        lines = [f"{i+1}. {co['name']}" for i, co in enumerate(results)]
+        buttons = [[str(i+1)] for i in range(len(results))]
+        buttons.append(["None of these"])
+        await update.message.reply_text(
+            f"Found {len(results)} matches:\n\n" + "\n".join(lines) +
+            "\n\nPick a number, or 'None of these' for manual entry.",
+            reply_markup=ReplyKeyboardMarkup(buttons, one_time_keyboard=True, resize_keyboard=True)
+        )
+        return CW_PICK
+    else:
+        ctx.user_data["cw_company"] = query
+        await update.message.reply_text(f"No match found for \"{query}\".\n\nUSDOT number?")
+        return CW_USDOT
+
+async def got_cw_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text.lower() == "none of these":
+        await update.message.reply_text(
+            "Enter the company name for manual entry:", reply_markup=ReplyKeyboardRemove())
+        return CW_NAME
+    results = ctx.user_data.get("cw_search_results", [])
+    try:
+        idx = int(text) - 1
+        if 0 <= idx < len(results):
+            co = results[idx]
+            return await _cw_generate_and_send(update, ctx, co["name"], co["usdot"], co["address"])
+    except ValueError:
+        pass
+    await update.message.reply_text("Invalid choice. Pick a number from the list, or 'None of these'.")
+    return CW_PICK
+
+async def got_cw_usdot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["cw_usdot"] = update.message.text.strip()
+    await update.message.reply_text("Physical address?")
+    return CW_ADDR
+
+async def got_cw_addr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    company = ctx.user_data["cw_company"]
+    usdot = ctx.user_data.get("cw_usdot", "")
+    address = update.message.text.strip()
+    return await _cw_generate_and_send(update, ctx, company, usdot, address)
+
+async def got_cw_scan_yes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    paths = ctx.user_data.get("generated_paths", [])
+    if not paths:
+        await update.message.reply_text("No PDFs to scan.", reply_markup=ReplyKeyboardRemove())
+        return ConversationHandler.END
+    await update.message.reply_text("Creating scanned PDF (full document)...", reply_markup=ReplyKeyboardRemove())
+    for path in paths:
+        try:
+            scanned = scannify_to_pdf(path)  # every page, one PDF
+            with open(scanned, "rb") as f:
+                await update.message.reply_document(
+                    document=f, filename=scanned.name,
+                    read_timeout=120, write_timeout=120, connect_timeout=120,
+                )
+        except Exception as e:
+            await update.message.reply_text(f"Error scanning: {e}")
+    await update.message.reply_text("Done!")
+    return ConversationHandler.END
+
+async def got_cw_scan_no(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("All done!", reply_markup=ReplyKeyboardRemove())
+    return ConversationHandler.END
+
 # ─── SCAN ANY PDF ─────────────────────────────────────────────────────────────
 
 async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -662,6 +775,21 @@ def main():
         fallbacks=[CommandHandler("cancel", cmd_cancel)],
     )
 
+    cw_conv = ConversationHandler(
+        entry_points=[CommandHandler("coverwhale", cmd_coverwhale)],
+        states={
+            CW_NAME:  [MessageHandler(filters.TEXT & ~filters.COMMAND, got_cw_name)],
+            CW_PICK:  [MessageHandler(filters.TEXT & ~filters.COMMAND, got_cw_pick)],
+            CW_USDOT: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_cw_usdot)],
+            CW_ADDR:  [MessageHandler(filters.TEXT & ~filters.COMMAND, got_cw_addr)],
+            CW_SCAN:  [
+                MessageHandler(filters.Regex(r"(?i)^yes$"), got_cw_scan_yes),
+                MessageHandler(filters.Regex(r"(?i)^no$"),  got_cw_scan_no),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+    )
+
     app.add_handler(CommandHandler("start",     cmd_start))
     app.add_handler(CommandHandler("scan",      cmd_scan))
     app.add_handler(CommandHandler("policy",    cmd_policy))
@@ -669,11 +797,13 @@ def main():
     app.add_handler(conv)
     app.add_handler(util_conv)
     app.add_handler(coc_conv)
+    app.add_handler(cw_conv)
     app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf_file))
 
     async def post_init(application):
         await application.bot.set_my_commands([
             BotCommand("new",       "Generate a policy PDF"),
+            BotCommand("coverwhale", "Generate full Cover Whale policy + scan"),
             BotCommand("utility",   "Generate a utility bill"),
             BotCommand("coc",       "Generate a Confirmation of Coverage"),
             BotCommand("scan",      "Scan any PDF document"),

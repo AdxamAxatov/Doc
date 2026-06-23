@@ -507,6 +507,214 @@ def generate_coc(company: str, address: str, output_dir: Path = None, dates: dic
     return out
 
 
+# ─── COVER WHALE FULL DOCUMENT (all 9 pages) ─────────────────────────────────
+# The VIATIC template is a Frankenstein: pages 1-3 are VIATIC LLC (policy
+# CUS09114581) but pages 4-9 were spliced in from OTHER quotes — page 4 header
+# says CHARLIE HAULING LLC, pages 5-9 say DEKS TRANSPORT LLC, all under policy
+# CUS09116580, plus page 6 carries a vehicle/driver schedule and page 7 an
+# address — all belonging to those other carriers. generate_coverwhale() makes
+# the whole document consistent with the target company.
+
+ALT_POLICY      = "CUS09116580"            # baked-in policy on pages 4-9
+ALT_COMPANY_P4  = "CHARLIE HAULING LLC"    # baked-in company on page 4 header
+ALT_COMPANY_REST = "DEKS TRANSPORT LLC"    # baked-in company on pages 5-9 headers
+
+# Original schedule values on page 6 / 7 (replaced every run)
+CW_OLD_VINS = ["3AKJHHFG3PSNL7399", "1FUJHHDR4NLMZ0512",
+               "3AKJHHFG5NSNE9904", "3AKJHHDRXNSNF2060"]
+CW_OLD_GARAGE = "17250 DALLAS PKWY, DALLAS, TX 75248"
+
+_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+_FIRST_NAMES = ["JAMES", "ROBERT", "MICHAEL", "DAVID", "JOSE", "CARLOS", "JOHN",
+                "LUIS", "DANIEL", "ANTHONY", "KEVIN", "BRIAN", "JASON", "ERIC",
+                "JUAN", "MARK", "STEVEN", "ANDREW", "RAYMOND", "GREGORY",
+                "MIGUEL", "DENNIS", "JERRY", "TYLER", "AARON", "HENRY"]
+_LAST_NAMES = ["SMITH", "JOHNSON", "GARCIA", "MARTINEZ", "BROWN", "DAVIS",
+               "RODRIGUEZ", "WILSON", "ANDERSON", "THOMAS", "HERNANDEZ", "MOORE",
+               "JACKSON", "WHITE", "HARRIS", "CLARK", "LEWIS", "WALKER", "HALL",
+               "ALLEN", "YOUNG", "KING", "WRIGHT", "TORRES", "NGUYEN", "REED"]
+
+
+def _split_full_address(address: str):
+    """(street, city, state, zip) from a free-form address string.
+    Reuses split_address for the street / city-line split, then peels the zip
+    and 2-letter state off the city line."""
+    street, rest = split_address(address.upper())
+    toks = rest.replace(",", " ").split()
+    zipc = state = ""
+    if toks and any(c.isdigit() for c in toks[-1]):
+        zipc = toks.pop()
+    if toks and len(toks[-1]) == 2 and toks[-1].isalpha():
+        state = toks.pop()
+    city = " ".join(toks)
+    return street, city, state, zipc
+
+
+def _rand_vin(rng):
+    chars = "ABCDEFGHJKLMNPRSTUVWXYZ0123456789"   # real VINs omit I, O, Q
+    return "".join(rng.choice(chars) for _ in range(17))
+
+
+def _rand_vehicle_years(rng, n):
+    """n years from {2022,2023,2024}, never all identical."""
+    pool = [2022, 2023, 2024]
+    while True:
+        ys = [rng.choice(pool) for _ in range(n)]
+        if len(set(ys)) > 1:
+            return ys
+
+
+def _rand_dob(rng):
+    """('Mon, DD', 'YYYY') — birth year below 2000."""
+    return f"{rng.choice(_MONTHS)}, {rng.randint(1, 28):02d}", str(rng.randint(1965, 1999))
+
+
+def _rand_hire(rng):
+    """('Mon, DD', '2025') — random hire date in 2025."""
+    return f"{rng.choice(_MONTHS)}, {rng.randint(1, 28):02d}", "2025"
+
+
+def _page_spans(page):
+    """Flat list of every text span on a page (snapshot of the original layout)."""
+    return [s for b in page.get_text("dict")["blocks"]
+            for l in b.get("lines", []) for s in l["spans"] if s["text"].strip()]
+
+
+def _find_span(spans, x0, y0, tol=2.5):
+    """Rect of the span whose top-left corner is ~(x0, y0). None if not found."""
+    for s in spans:
+        bx0, by0, bx1, by1 = s["bbox"]
+        if abs(bx0 - x0) <= tol and abs(by0 - y0) <= tol:
+            return fitz.Rect(bx0, by0, bx1, by1)
+    return None
+
+
+def _set_rect(page, rect, new_text, *, size, font=FONT_REG, color=(0.0, 0.0, 0.0)):
+    """Cover a span's rect with white and write new_text at the same left
+    baseline (all these cells sit on white)."""
+    if rect is None:
+        return
+    fp = str(font)
+    fname = "F" + str(abs(hash(fp)) % 100000)
+    page.draw_rect(fitz.Rect(rect.x0 - 1, rect.y0 - 1, rect.x1 + 1, rect.y1 + 1),
+                   color=(1, 1, 1), fill=(1, 1, 1), width=0)
+    page.insert_text((rect.x0, rect.y1 - 1.0), new_text,
+                     fontfile=fp, fontname=fname, fontsize=size, color=color)
+
+
+def fill_header_alt(page, old_company, old_policy, company, policy, pix):
+    """Top-right header on pages 4-9 (different baked-in company/policy than
+    pages 1-3). Right-aligns to the same x=569 edge, DejaVu 7.36 #363636."""
+    replace_on_page(page, f"TGL Policy #:  {old_policy}", f"TGL Policy #:  {policy}",
+                    fontsize=7.36, top_right_x=569.0, pix=pix, color=CLR_HEADER)
+    replace_on_page(page, old_company, company,
+                    fontsize=7.36, top_right_x=569.0, pix=pix,
+                    x_min=400, y_max=80, color=CLR_HEADER)
+
+
+def fill_page6_schedule(page, street, city, state, zipc, rng):
+    """Page 6 — vehicle schedule (VIN + year), garage location, driver schedule
+    (names, DOB, hire date). Coordinate-targeted because years/dates repeat."""
+    spans = _page_spans(page)
+
+    # Vehicle VINs — each is unique, safe to text-replace. Random VIN-like strings.
+    for old_vin in CW_OLD_VINS:
+        replace_on_page(page, old_vin, _rand_vin(rng), fontsize=9.6)
+
+    # Vehicle years (x0≈156.5) — coordinate-targeted; '2022' repeats 6× on page.
+    year_y = [184.7, 206.8, 228.9, 251.0]
+    for y, yr in zip(year_y, _rand_vehicle_years(rng, len(year_y))):
+        _set_rect(page, _find_span(spans, 156.5, y), str(yr), size=9.6)
+
+    # Garage location → company address (single line, unique string).
+    replace_on_page(page, CW_OLD_GARAGE, f"{street}, {city}, {state} {zipc}", fontsize=9.6)
+
+    # Driver schedule rows (size 6.3). Coords from the template's own spans.
+    rows = [
+        dict(fn=(46.4, 494.0), ln=(89.2, 494.0),
+             dob_md=(225.3, 490.3), dob_yr=(225.3, 497.8),
+             hire_md=(311.0, 490.3), hire_yr=(311.0, 497.8)),
+        dict(fn=(46.4, 516.0), ln=(89.2, 516.0),
+             dob_md=(225.3, 512.2), dob_yr=(225.3, 519.8),
+             hire_md=(311.0, 512.2), hire_yr=(311.0, 519.8)),
+        dict(fn=(46.4, 537.9), ln=(89.2, 537.9),
+             dob_md=(225.3, 534.2), dob_yr=(225.3, 541.7),
+             hire_md=(311.0, 534.2), hire_yr=(311.0, 541.7)),
+    ]
+    for row in rows:
+        fn, ln = rng.choice(_FIRST_NAMES), rng.choice(_LAST_NAMES)
+        dob_md, dob_yr = _rand_dob(rng)
+        hire_md, hire_yr = _rand_hire(rng)
+        vals = {"fn": fn, "ln": ln, "dob_md": dob_md, "dob_yr": dob_yr,
+                "hire_md": hire_md, "hire_yr": hire_yr}
+        for key, val in vals.items():
+            x0, y0 = row[key]
+            _set_rect(page, _find_span(spans, x0, y0), val, size=6.3)
+
+
+def fill_page7_address(page, street, city, state, zipc):
+    """Page 7 — the Address / City / State / Zip row → company address."""
+    spans = _page_spans(page)
+    for x0, val in [(48.8, street), (327.8, city), (399.5, state), (469.2, zipc)]:
+        _set_rect(page, _find_span(spans, x0, 115.6), val.upper(), size=10.2)
+
+
+def generate_coverwhale(company: str, usdot: str, address: str, policy: str,
+                        output_dir: Path = None, rng=None) -> Path:
+    """Fill the WHOLE 9-page Cover Whale policy for one company — pages 1-3 like
+    /new, plus pages 4-9 (headers + page-6 schedule + page-7 address) so the
+    entire document is consistent with the target company."""
+    if output_dir is None:
+        output_dir = OUTPUT_DIR
+    output_dir.mkdir(exist_ok=True)
+    rng = rng or random
+
+    company_up = company.strip().upper()
+    addr1, addr2 = split_address(address.upper())
+    street, city, state, zipc = _split_full_address(address)
+
+    doc = fitz.open(TEMPLATE_PDF)
+
+    p = doc[0]; pix = p.get_pixmap(dpi=72)
+    fill_page1(p, company_up, usdot, addr1, addr2, policy, pix)
+
+    p = doc[1]; pix = p.get_pixmap(dpi=72)
+    fill_page2(p, company_up, addr1, addr2, policy, pix)
+
+    p = doc[2]; pix = p.get_pixmap(dpi=72)          # page 3 — VIATIC header
+    fill_page_header_only(p, company_up, policy, pix)
+
+    p = doc[3]; pix = p.get_pixmap(dpi=72)          # page 4 — CHARLIE HAULING header
+    fill_header_alt(p, ALT_COMPANY_P4, ALT_POLICY, company_up, policy, pix)
+
+    p = doc[4]; pix = p.get_pixmap(dpi=72)          # page 5 — DEKS header
+    fill_header_alt(p, ALT_COMPANY_REST, ALT_POLICY, company_up, policy, pix)
+
+    p = doc[5]; pix = p.get_pixmap(dpi=72)          # page 6 — DEKS header + schedule
+    fill_header_alt(p, ALT_COMPANY_REST, ALT_POLICY, company_up, policy, pix)
+    fill_page6_schedule(p, street, city, state, zipc, rng)
+
+    p = doc[6]; pix = p.get_pixmap(dpi=72)          # page 7 — DEKS header + address
+    fill_header_alt(p, ALT_COMPANY_REST, ALT_POLICY, company_up, policy, pix)
+    fill_page7_address(p, street, city, state, zipc)
+
+    for i in (7, 8):                                # pages 8 & 9 — DEKS header only
+        p = doc[i]; pix = p.get_pixmap(dpi=72)
+        fill_header_alt(p, ALT_COMPANY_REST, ALT_POLICY, company_up, policy, pix)
+
+    safe = (company_up
+            .replace("/", "-").replace("\\", "-").replace(":", "")
+            .replace("*", "").replace("?", "").replace('"', "")
+            .replace("<", "").replace(">", "").replace("|", "")
+            .replace("'", ""))
+    out = output_dir / f"Cover Whale - {safe}.pdf"
+    doc.save(str(out), garbage=4, deflate=True)
+    doc.close()
+    logger.info(f"Cover Whale full policy saved: {out.name}")
+    return out
+
+
 # ─── SCAN EFFECT ──────────────────────────────────────────────────────────────
 
 def _scan_one(page, dpi: int):

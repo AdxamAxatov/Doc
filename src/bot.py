@@ -28,7 +28,7 @@ import fitz
 from generate import (
     ensure_fonts, split_address, fill_page1, fill_page2,
     fill_page_header_only, increment_policy, scannify_pdf, scannify_to_pdf,
-    generate_utility, generate_coc,
+    generate_utility, generate_coc, generate_coverwhale,
     PROJECT_DIR, OUTPUT_DIR, TEMPLATE_PDF,
     FONT_REG, FONT_BOLD, logger,
 )
@@ -581,7 +581,7 @@ async def _cw_generate_and_send(update, ctx, company, usdot, address):
     await update.message.reply_text("Generating Cover Whale policy...", reply_markup=ReplyKeyboardRemove())
     try:
         policy = load_policy()
-        path = make_pdf(company, usdot, address, policy)
+        path = generate_coverwhale(company, usdot, address, policy)
         ctx.user_data["generated_paths"] = [path]
         with open(path, "rb") as f:
             await update.message.reply_document(

@@ -52,12 +52,12 @@ ARIAL_BOLD = _MAC_ARIAL_B if _MAC_ARIAL_B.exists() else Path("C:/Windows/Fonts/a
 
 def _coc_dates(rng=None):
     """Dates for the Confirmation-of-Coverage doc. Start = random day in
-    October 2025; term end = same day October 2026; due = start + 21 days.
+    April 2026; term end = same day April 2027; due = start + 21 days.
     Returns the exact format strings used at each spot in the template."""
     rng = rng or random
-    day = rng.randint(1, 31)
-    start = date(2025, 10, day)
-    end = date(2026, 10, day)
+    day = rng.randint(1, 30)            # April has 30 days
+    start = date(2026, 4, day)
+    end = date(2027, 4, day)
     due = start + timedelta(days=21)
     return {
         "start_slash": start.strftime("%m/%d/%Y"),

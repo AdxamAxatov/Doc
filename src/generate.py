@@ -604,14 +604,20 @@ def _bg_at(pix, x, y, pw, ph):
 
 
 def _set_rect(page, rect, new_text, *, size, font=FONT_REG, color=(0.0, 0.0, 0.0),
-              bg=(1.0, 1.0, 1.0)):
+              bg=(1.0, 1.0, 1.0), max_width=None):
     """Cover a span's rect with the row background color and write new_text at
     the same left baseline. Pass bg for shaded (zebra-striped) rows so the
-    cover patch doesn't show."""
+    cover patch doesn't show. Pass max_width to shrink the font when the new
+    value would overflow its column (e.g. a wide random VIN crashing into the
+    next column)."""
     if rect is None:
         return
     fp = str(font)
+    fobj = fitz.Font(fontfile=fp)
     fname = "F" + str(abs(hash(fp)) % 100000)
+    if max_width:
+        while size > 5.0 and fobj.text_length(new_text, fontsize=size) > max_width:
+            size -= 0.2
     page.draw_rect(fitz.Rect(rect.x0 - 1, rect.y0 - 1, rect.x1 + 1, rect.y1 + 1),
                    color=bg, fill=bg, width=0)
     page.insert_text((rect.x0, rect.y1 - 1.0), new_text,
@@ -636,24 +642,23 @@ def fill_page6_schedule(page, street, city, state, zipc, rng, pix=None):
     spans = _page_spans(page)
     pw, ph = page.rect.width, page.rect.height
 
-    # Vehicle VINs — unique strings. replace_on_page samples bg 4px left of the
-    # VIN (x≈44), which on this table reflects the row's stripe color correctly.
-    for old_vin in CW_OLD_VINS:
-        replace_on_page(page, old_vin, _rand_vin(rng), fontsize=9.6, pix=pix)
-
-    # Vehicle years (x0≈156.5) — coordinate-targeted; '2022' repeats 6× on page.
-    # Row bg sampled at x=152 (the blank gap just left of the Year column).
-    year_y = [184.7, 206.8, 228.9, 251.0]
-    for y, yr in zip(year_y, _rand_vehicle_years(rng, len(year_y))):
-        _set_rect(page, _find_span(spans, 156.5, y), str(yr), size=9.6,
-                  bg=_bg_at(pix, 152, y, pw, ph))
+    # Vehicle VIN (x0≈48.4) + Year (x0≈156.5) per row. Coordinate-targeted: '2022'
+    # repeats 6× on the page. Row bg sampled at x=152 (blank gap before Year).
+    # VINs are width-fitted (max_width=103) so a wide random VIN never crashes
+    # into the Year column at x=156.5.
+    veh_y = [184.7, 206.8, 228.9, 251.0]
+    for y, yr in zip(veh_y, _rand_vehicle_years(rng, len(veh_y))):
+        row_bg = _bg_at(pix, 152, y, pw, ph)
+        _set_rect(page, _find_span(spans, 48.4, y), _rand_vin(rng), size=9.6,
+                  bg=row_bg, max_width=103)
+        _set_rect(page, _find_span(spans, 156.5, y), str(yr), size=9.6, bg=row_bg)
 
     # Garage location → company address. Coordinate-targeted (not replace_on_page)
     # because the bold "Garage Location:" label sits flush to the value's left, so
     # left-sampling the bg catches a dark label glyph. Probe a blank spot at x=450.
     _set_rect(page, _find_span(spans, 134.7, 273.1),
               f"{street}, {city}, {state} {zipc}", size=9.6,
-              bg=_bg_at(pix, 450, 273.1, pw, ph))
+              bg=_bg_at(pix, 450, 273.1, pw, ph), max_width=420)
 
     # Driver schedule rows (size 6.3). Coords from the template's own spans.
     # Row bg probed at x=295 (blank gap between Years-Exp and Date-of-Hire) — the
@@ -683,12 +688,16 @@ def fill_page6_schedule(page, street, city, state, zipc, rng, pix=None):
 
 
 def fill_page7_address(page, street, city, state, zipc, pix=None):
-    """Page 7 — the Address / City / State / Zip row → company address."""
+    """Page 7 — the Address / City / State / Zip row → company address. Each cell
+    is width-fitted so a long street/city can't spill into the next column."""
     spans = _page_spans(page)
     pw, ph = page.rect.width, page.rect.height
     row_bg = _bg_at(pix, 250, 115.6, pw, ph)   # blank gap between Address & City
-    for x0, val in [(48.8, street), (327.8, city), (399.5, state), (469.2, zipc)]:
-        _set_rect(page, _find_span(spans, x0, 115.6), val.upper(), size=10.2, bg=row_bg)
+    # (x0, value, max column width before the next column starts)
+    cells = [(48.8, street, 273), (327.8, city, 67), (399.5, state, 65), (469.2, zipc, 95)]
+    for x0, val, mw in cells:
+        _set_rect(page, _find_span(spans, x0, 115.6), val.upper(), size=10.2,
+                  bg=row_bg, max_width=mw)
 
 
 def generate_coverwhale(company: str, usdot: str, address: str, policy: str,

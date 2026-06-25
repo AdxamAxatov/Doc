@@ -288,8 +288,8 @@ async def got_more_no(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     document=f,
                     filename=path.name,
                     caption=f"{co['name']} — {policy}",
-                    read_timeout=60,
-                    write_timeout=60,
+                    read_timeout=300,
+                    write_timeout=600,
                     connect_timeout=60,
                 )
             policy = increment_policy(policy)
@@ -335,8 +335,8 @@ async def got_scan_yes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_document(
                         document=f,
                         filename=jpg_path.name,
-                        read_timeout=60,
-                        write_timeout=60,
+                        read_timeout=300,
+                        write_timeout=600,
                         connect_timeout=60,
                     )
         except Exception as e:
@@ -371,7 +371,7 @@ async def _ut_generate_and_send(update, ctx, company, address):
                 document=f,
                 filename=path.name,
                 caption=f"Utility bill — {company.upper()}",
-                read_timeout=60, write_timeout=60, connect_timeout=60,
+                read_timeout=300, write_timeout=600, connect_timeout=60,
             )
         logger.info(f"Utility bill sent: {company} | {address}")
         await update.message.reply_text("Want a scanned version?", reply_markup=YES_NO)
@@ -453,7 +453,7 @@ async def got_ut_scan_yes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 with open(jpg_path, "rb") as f:
                     await update.message.reply_document(
                         document=f, filename=jpg_path.name,
-                        read_timeout=60, write_timeout=60, connect_timeout=60,
+                        read_timeout=300, write_timeout=600, connect_timeout=60,
                     )
         except Exception as e:
             await update.message.reply_text(f"Error scanning: {e}")
@@ -483,7 +483,7 @@ async def _coc_generate_and_send(update, ctx, company, address):
             await update.message.reply_document(
                 document=f, filename=path.name,
                 caption=f"Confirmation of Coverage — {company.upper()}",
-                read_timeout=60, write_timeout=60, connect_timeout=60,
+                read_timeout=300, write_timeout=600, connect_timeout=60,
             )
         logger.info(f"CoC sent: {company} | {address}")
         await update.message.reply_text("Want a scanned version?", reply_markup=YES_NO)
@@ -552,7 +552,7 @@ async def got_coc_scan_yes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             with open(scanned, "rb") as f:
                 await update.message.reply_document(
                     document=f, filename=scanned.name,
-                    read_timeout=120, write_timeout=120, connect_timeout=120,
+                    read_timeout=300, write_timeout=600, connect_timeout=120,
                 )
         except Exception as e:
             await update.message.reply_text(f"Error scanning: {e}")
@@ -587,7 +587,7 @@ async def _cw_generate_and_send(update, ctx, company, usdot, address):
             await update.message.reply_document(
                 document=f, filename=path.name,
                 caption=f"Cover Whale — {company.upper()} — {policy}",
-                read_timeout=60, write_timeout=60, connect_timeout=60,
+                read_timeout=300, write_timeout=600, connect_timeout=60,
             )
         save_policy(increment_policy(policy))
         logger.info(f"Cover Whale sent: {company} | {policy} | USDOT: {usdot}")
@@ -663,7 +663,7 @@ async def got_cw_scan_yes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             with open(scanned, "rb") as f:
                 await update.message.reply_document(
                     document=f, filename=scanned.name,
-                    read_timeout=120, write_timeout=120, connect_timeout=120,
+                    read_timeout=300, write_timeout=600, connect_timeout=120,
                 )
         except Exception as e:
             await update.message.reply_text(f"Error scanning: {e}")
@@ -702,7 +702,7 @@ async def handle_pdf_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             with open(jpg_path, "rb") as f:
                 await update.message.reply_document(
                     document=f, filename=jpg_path.name,
-                    read_timeout=60, write_timeout=60, connect_timeout=60,
+                    read_timeout=300, write_timeout=600, connect_timeout=60,
                 )
 
         logger.info(f"Scanned PDF: {doc.file_name} -> {len(jpg_paths)} pages")
@@ -725,7 +725,8 @@ def main():
 
     from telegram.ext import Defaults
     from telegram.request import HTTPXRequest
-    request = HTTPXRequest(read_timeout=60, write_timeout=60, connect_timeout=60)
+    request = HTTPXRequest(read_timeout=300, write_timeout=600, connect_timeout=60,
+                           pool_timeout=120, connection_pool_size=16)
     app = Application.builder().token(TOKEN).request(request).build()
 
     conv = ConversationHandler(

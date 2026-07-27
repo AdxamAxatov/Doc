@@ -217,7 +217,9 @@ async def cmd_new(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ASK_NAME
 
 async def got_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.message.text.strip()
+    query = await check_field(update, ctx, looks_like_company, "name", "What's the company name?")
+    if query is None:
+        return ASK_NAME
     user = update.effective_user.first_name
     logger.info(f"[{user}] Search: \"{query}\"")
     results = search_companies(query)
@@ -299,7 +301,10 @@ async def got_usdot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ASK_ADDR
 
 async def got_addr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data["current"]["address"] = update.message.text.strip()
+    address = await check_field(update, ctx, looks_like_address, "addr", "Physical address?")
+    if address is None:
+        return ASK_ADDR
+    ctx.user_data["current"]["address"] = address
     n = add_company(ctx, ctx.user_data.pop("current"))
     await update.message.reply_text(
         f"Company {n} added. Add another?",
@@ -435,7 +440,9 @@ async def _ut_generate_and_send(update, ctx, company, address):
         return ConversationHandler.END
 
 async def got_ut_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.message.text.strip()
+    query = await check_field(update, ctx, looks_like_company, "ut_name", "Company name?")
+    if query is None:
+        return UT_NAME
     user = update.effective_user.first_name
     logger.info(f"[{user}] Utility search: \"{query}\"")
     results = search_companies(query)
@@ -489,8 +496,10 @@ async def got_ut_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return UT_PICK
 
 async def got_ut_addr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    address = await check_field(update, ctx, looks_like_address, "ut_addr", "Enter the address:")
+    if address is None:
+        return UT_ADDR
     company = ctx.user_data["ut_company"]
-    address = update.message.text.strip()
     return await _ut_generate_and_send(update, ctx, company, address)
 
 async def got_ut_scan_yes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -547,7 +556,9 @@ async def _coc_generate_and_send(update, ctx, company, address):
         return ConversationHandler.END
 
 async def got_coc_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.message.text.strip()
+    query = await check_field(update, ctx, looks_like_company, "coc_name", "Company name?")
+    if query is None:
+        return COC_NAME
     user = update.effective_user.first_name
     logger.info(f"[{user}] CoC search: \"{query}\"")
     results = search_companies(query)
@@ -589,8 +600,10 @@ async def got_coc_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return COC_PICK
 
 async def got_coc_addr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    address = await check_field(update, ctx, looks_like_address, "coc_addr", "Enter the address:")
+    if address is None:
+        return COC_ADDR
     company = ctx.user_data["coc_company"]
-    address = update.message.text.strip()
     return await _coc_generate_and_send(update, ctx, company, address)
 
 async def got_coc_scan_yes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -652,7 +665,9 @@ async def _cw_generate_and_send(update, ctx, company, usdot, address):
         return ConversationHandler.END
 
 async def got_cw_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.message.text.strip()
+    query = await check_field(update, ctx, looks_like_company, "cw_name", "Company name?")
+    if query is None:
+        return CW_NAME
     user = update.effective_user.first_name
     logger.info(f"[{user}] Cover Whale search: \"{query}\"")
     results = search_companies(query)
@@ -699,9 +714,11 @@ async def got_cw_usdot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return CW_ADDR
 
 async def got_cw_addr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    address = await check_field(update, ctx, looks_like_address, "cw_addr", "Physical address?")
+    if address is None:
+        return CW_ADDR
     company = ctx.user_data["cw_company"]
     usdot = ctx.user_data.get("cw_usdot", "")
-    address = update.message.text.strip()
     return await _cw_generate_and_send(update, ctx, company, usdot, address)
 
 async def got_cw_scan_yes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):

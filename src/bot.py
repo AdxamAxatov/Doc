@@ -32,6 +32,7 @@ from generate import (
     PROJECT_DIR, OUTPUT_DIR, TEMPLATE_PDF,
     FONT_REG, FONT_BOLD, logger,
 )
+from validation import looks_like_company, looks_like_address
 
 # ─── COMPANY DATABASE ────────────────────────────────────────────────────────
 
@@ -93,8 +94,60 @@ COC_NAME, COC_PICK, COC_ADDR, COC_SCAN = range(20, 24)
 CW_NAME, CW_PICK, CW_USDOT, CW_ADDR, CW_SCAN = range(30, 35)
 
 YES_NO = ReplyKeyboardMarkup([["Yes", "No"]], one_time_keyboard=True, resize_keyboard=True)
+USE_ANYWAY = ReplyKeyboardMarkup([["Use it anyway"], ["Try again"]],
+                                 one_time_keyboard=True, resize_keyboard=True)
 
 # ─── HELPERS ──────────────────────────────────────────────────────────────────
+
+async def check_field(update, ctx, validator, slot, prompt):
+    """
+    Validate one free-text answer before the caller acts on it.
+
+    Returns the value to use, or None when a re-prompt has already been sent and
+    the caller should return its own conversation state unchanged.
+
+    Bookkeeping lives in ctx.user_data under two keys derived from `slot`:
+      _pend_<slot>  the most recently rejected value, held so it can be forced through
+      _rej_<slot>   how many times this field has been rejected
+
+    The override buttons arrive as ordinary text inside the state the caller
+    already returned, so no new conversation states are needed.
+    """
+    text = update.message.text.strip()
+    pend_key, rej_key = f"_pend_{slot}", f"_rej_{slot}"
+    user = update.effective_user.first_name
+
+    if text.lower() == "use it anyway":
+        pending = ctx.user_data.pop(pend_key, None)
+        ctx.user_data.pop(rej_key, None)
+        if pending:
+            logger.info(f'[{user}] Override accepted {slot}: "{pending}"')
+            return pending
+        await update.message.reply_text(prompt, reply_markup=ReplyKeyboardRemove())
+        return None
+
+    if text.lower() == "try again":
+        ctx.user_data.pop(pend_key, None)
+        ctx.user_data.pop(rej_key, None)
+        await update.message.reply_text(prompt, reply_markup=ReplyKeyboardRemove())
+        return None
+
+    err = validator(text)
+    if err is None:
+        ctx.user_data.pop(pend_key, None)
+        ctx.user_data.pop(rej_key, None)
+        return text
+
+    strikes = ctx.user_data.get(rej_key, 0) + 1
+    ctx.user_data[rej_key] = strikes
+    ctx.user_data[pend_key] = text
+    logger.info(f'[{user}] Rejected {slot} (strike {strikes}): "{text}"')
+    if strikes >= 2:
+        await update.message.reply_text(f"{err}\n\nUse it anyway?",
+                                        reply_markup=USE_ANYWAY)
+    else:
+        await update.message.reply_text(err, reply_markup=ReplyKeyboardRemove())
+    return None
 
 def make_pdf(company: str, usdot: str, address: str, policy: str) -> Path:
     """Generate one PDF and return its path."""

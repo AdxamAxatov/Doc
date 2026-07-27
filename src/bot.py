@@ -149,6 +149,15 @@ async def check_field(update, ctx, validator, slot, prompt):
         await update.message.reply_text(err, reply_markup=ReplyKeyboardRemove())
     return None
 
+def _clear_validation_state(ctx):
+    """Drop every field's strike count and pending value.
+
+    ConversationHandler.END does not clear user_data, so without this a
+    rejected value could be forced into a later, unrelated conversation.
+    """
+    for key in [k for k in ctx.user_data if k.startswith(("_rej_", "_pend_"))]:
+        ctx.user_data.pop(key, None)
+
 def make_pdf(company: str, usdot: str, address: str, policy: str) -> Path:
     """Generate one PDF and return its path."""
     OUTPUT_DIR.mkdir(exist_ok=True)
@@ -209,6 +218,7 @@ async def cmd_setpolicy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Policy set to {args[0].strip()}")
 
 async def cmd_new(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    _clear_validation_state(ctx)
     ctx.user_data["companies"] = []
     await update.message.reply_text(
         "What's the company name?",
@@ -412,6 +422,7 @@ async def got_scan_no(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ─── UTILITY BILL HANDLERS ───────────────────────────────────────────────────
 
 async def cmd_utility(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    _clear_validation_state(ctx)
     await update.message.reply_text(
         "Utility bill generator\n\nCompany name?",
         reply_markup=ReplyKeyboardRemove()
@@ -529,6 +540,7 @@ async def got_ut_scan_no(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ─── CONFIRMATION OF COVERAGE HANDLERS ───────────────────────────────────────
 
 async def cmd_coc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    _clear_validation_state(ctx)
     await update.message.reply_text(
         "Confirmation of Coverage generator\n\nCompany name?",
         reply_markup=ReplyKeyboardRemove()
@@ -636,6 +648,7 @@ async def got_coc_scan_no(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # counter, and scannify_to_pdf() for the full-document scan.
 
 async def cmd_coverwhale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    _clear_validation_state(ctx)
     await update.message.reply_text(
         "Cover Whale policy generator (full document)\n\nCompany name?",
         reply_markup=ReplyKeyboardRemove()
@@ -784,6 +797,7 @@ async def handle_pdf_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ─── GENERAL ──────────────────────────────────────────────────────────────────
 
 async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    _clear_validation_state(ctx)
     await update.message.reply_text("Cancelled.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 

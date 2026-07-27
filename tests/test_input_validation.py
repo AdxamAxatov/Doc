@@ -30,6 +30,11 @@ BAD_COMPANIES = [
     "3213915",
     "",
     "X",
+    # Real addresses sampled from assets/All Companies.csv — the unguarded
+    # half of the swap incident (address typed at the name prompt).
+    "2404 KARBA WAY, KISSIMMEE, FL 34746",
+    "10318 CHEEVES, HOUSTON, TX 77016",
+    "265 Faulkner Dr, Niantic, IL 62551",
 ]
 
 # Manual entries and the newline form stored in the CSV.

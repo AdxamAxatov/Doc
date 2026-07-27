@@ -23,6 +23,10 @@ STATE_RE = re.compile(
 
 ADDR_EXAMPLE = "Example: 1234 Main St, Houston, TX 77016"
 
+# A comma followed by a US state abbreviation as a whole word, e.g. ", TX" or
+# ", FL". Reuses STATE_RE's alternation rather than duplicating the state list.
+STATE_AFTER_COMMA_RE = re.compile(r",\s*" + STATE_RE.pattern, re.I)
+
 
 def looks_like_company(s: str) -> str | None:
     """Error message if `s` is not shaped like a company name, else None."""
@@ -40,6 +44,11 @@ def looks_like_company(s: str) -> str | None:
     # companies 7573 LLC and 1524 INC, and caught nothing this check misses.
     if not any(c.isalpha() for c in s):
         return ("That looks like a number, not a company name.\n"
+                "Please enter the company name.")
+    # A ZIP code, or a comma followed by a state abbreviation, means this is a
+    # mailing address that landed at the company-name prompt.
+    if ZIP_RE.search(s) or STATE_AFTER_COMMA_RE.search(s):
+        return ("That looks like an address, not a company name.\n"
                 "Please enter the company name.")
     return None
 

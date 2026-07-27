@@ -52,7 +52,7 @@ async def main():
         (bot.got_ut_addr, bot.UT_ADDR, FakeCtx(ut_company="LEO EMPIRE SERVICES LLC"), "ut_addr"),
         (bot.got_coc_addr, bot.COC_ADDR, FakeCtx(coc_company="LEO EMPIRE SERVICES LLC"), "coc_addr"),
         (bot.got_cw_addr, bot.CW_ADDR, FakeCtx(cw_company="LEO EMPIRE SERVICES LLC", cw_usdot="123"), "cw_addr"),
-        (bot.got_addr, bot.ASK_ADDR, FakeCtx(current={"name": "X", "usdot": "1"}), "addr"),
+        (bot.got_addr, bot.ASK_ADDR, FakeCtx(companies=[], current={"name": "X", "usdot": "1"}), "addr"),
     ]
     for handler, expected_state, ctx, slot in addr_cases:
         upd = FakeUpdate("LEO EMPIRE SERVICES LLC")
@@ -80,6 +80,8 @@ async def main():
         state = await handler(upd, ctx)
         if state != expected_state:
             failures.append(f"{handler.__name__}: expected state {expected_state}, got {state}")
+        if not upd.message.replies:
+            failures.append(f"{handler.__name__}: no rejection message sent")
         if ctx.user_data.get(f"_rej_{slot}") != 1:
             failures.append(f"{handler.__name__}: strike not recorded ({ctx.user_data!r})")
 
@@ -92,6 +94,40 @@ async def main():
     await bot.got_ut_addr(upd, ctx)
     if not generated:
         failures.append("a valid address did not reach generation")
+
+    # A good company name still advances (the guard must not break search).
+    # COMPANIES_DB is empty in tests, so this always takes the no-match branch.
+    ctx = FakeCtx()
+    upd = FakeUpdate("SOME BRAND NEW TRUCKING LLC")
+    state = await bot.got_ut_name(upd, ctx)
+    if state != bot.UT_ADDR:
+        failures.append(f"got_ut_name: a valid company name did not advance to UT_ADDR, got {state}")
+
+    # Reviewer's scenario B: a stale pending value from a cancelled conversation
+    # must never leak into a later, unrelated one via "Use it anyway".
+    generated.clear()
+    ctx = FakeCtx(ut_company="OLDCO")
+    await bot.got_ut_addr(FakeUpdate("OLD BAD VALUE 1"), ctx)  # strike 1
+    await bot.got_ut_addr(FakeUpdate("OLD BAD VALUE 1"), ctx)  # strike 2, pending set
+    if ctx.user_data.get("_pend_ut_addr") != "OLD BAD VALUE 1":
+        failures.append(f"scenario B setup failed: {ctx.user_data!r}")
+
+    # /cancel ends the conversation — it must also clear the strike bookkeeping.
+    await bot.cmd_cancel(FakeUpdate("/cancel"), ctx)
+    if any(k.startswith(("_rej_", "_pend_")) for k in ctx.user_data):
+        failures.append(f"cmd_cancel left validation state behind: {ctx.user_data!r}")
+
+    # A fresh /utility conversation for a different company (re-entry, not via
+    # /cancel, is the case the reviewer flagged as also needing the clear)...
+    await bot.cmd_utility(FakeUpdate("/utility"), ctx)
+    ctx.user_data["ut_company"] = "NEWCO"
+
+    # ...so "Use it anyway" here must re-prompt, not resurrect the old value.
+    state = await bot.got_ut_addr(FakeUpdate("Use it anyway"), ctx)
+    if generated:
+        failures.append(f"stale pending value leaked into new conversation: {generated!r}")
+    if state != bot.UT_ADDR:
+        failures.append(f"got_ut_addr: 'Use it anyway' with no pending value should re-prompt, got {state}")
 
 
 asyncio.run(main())

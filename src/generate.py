@@ -118,7 +118,15 @@ def _coc_set(page, old, new, *, size, color, font, center=False):
     fp = str(font)
     fobj = fitz.Font(fontfile=fp)
     fname = "F" + str(abs(hash(fp)) % 100000)
-    for rect in page.search_for(old):
+    rects = page.search_for(old)
+    if not rects:
+        return
+
+    # Strip the sample text before painting; writing first would redact the
+    # new value along with it. See _strip_text.
+    _strip_text(page, rects)
+
+    for rect in rects:
         page.draw_rect(fitz.Rect(rect.x0 - 1, rect.y0 - 1, rect.x1 + 1, rect.y1 + 1),
                        color=(1, 1, 1), fill=(1, 1, 1), width=0)
         tw = fobj.text_length(new, fontsize=size)
@@ -226,6 +234,34 @@ def sample_bg(pix, rect, pw, ph):
         return (1.0, 1.0, 1.0)
 
 
+def _strip_text(page, rects):
+    """Delete the text inside `rects` from the page's content stream.
+
+    Painting a rectangle over text only hides it: the characters stay in the
+    text layer and come straight back out of copy/paste or any text extractor,
+    so a generated document still carried the template's sample company, address
+    and dates. Redaction actually removes them.
+
+    Images and line art are explicitly preserved. The defaults
+    (images=PDF_REDACT_IMAGE_REMOVE, graphics=PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED)
+    delete anything a redaction rect touches, which wipes table rules, shaded
+    rows and logos — that is what made an earlier attempt at this corrupt the
+    page and get reverted to draw_rect.
+    """
+    if not rects:
+        return
+    for r in rects:
+        # Shrink to the middle band of the line box. Redaction drops every
+        # character whose box the rect touches, and glyph boxes span the full
+        # line height including ascender and descender — so a full-height rect
+        # also catches the lines directly above and below. On the CoC mailing
+        # address that deleted the street line that had just been written.
+        inset = min(r.height * 0.3, 2.5)
+        page.add_redact_annot(fitz.Rect(r.x0, r.y0 + inset, r.x1, r.y1 - inset))
+    page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE,
+                          graphics=fitz.PDF_REDACT_LINE_ART_NONE)
+
+
 def replace_on_page(page, old_text, new_text, pix=None,
                     fontsize=None, bold=False, center=False,
                     cell_center_x=None, cell_right_x=None, cell_left_x=None,
@@ -237,10 +273,13 @@ def replace_on_page(page, old_text, new_text, pix=None,
                     font_reg=None, font_bold=None):
     """
     Find every occurrence of old_text on page that passes the x/y filters,
-    cover it with a filled rectangle matching the background, then write
-    new_text at the correct position.
-    Uses draw_rect instead of redaction annotations to avoid corrupting
-    adjacent content in the PDF stream.
+    delete it, cover it with a filled rectangle matching the background, then
+    write new_text at the correct position.
+
+    Runs in two passes: every replacement is worked out first, the original
+    text is stripped in a single redaction pass, and only then is anything
+    painted. The new text has to be written after the redaction — writing it
+    first would strip it along with the original.
     """
     hits = page.search_for(old_text)
     if not hits:
@@ -248,6 +287,7 @@ def replace_on_page(page, old_text, new_text, pix=None,
 
     pw, ph = page.rect.width, page.rect.height
 
+    plans = []
     for rect in hits:
         # ── positional guards ────────────────────────────────────────────────
         if x_min is not None and rect.x0 < x_min: continue
@@ -298,7 +338,15 @@ def replace_on_page(page, old_text, new_text, pix=None,
             x = rect.x0
 
         y = rect.y1 - 1.0          # baseline just inside the bottom of the bbox
+        plans.append((rect, x, y, sz, fp, use_bold))
 
+    if not plans:
+        return
+
+    # ── delete the original text, then repaint over where it was ─────────────
+    _strip_text(page, [p[0] for p in plans])
+
+    for rect, x, y, sz, fp, use_bold in plans:
         # ── cover old text with a rectangle matching the actual background ──
         bg = sample_bg(pix, rect, pw, ph)
         cover = fitz.Rect(rect.x0 - 1.0, rect.y0 - 1.0,
@@ -630,6 +678,8 @@ def _set_rect(page, rect, new_text, *, size, font=FONT_REG, color=(0.0, 0.0, 0.0
     if max_width:
         while size > 5.0 and fobj.text_length(new_text, fontsize=size) > max_width:
             size -= 0.2
+    # Strip the original span before painting; see _strip_text.
+    _strip_text(page, [rect])
     page.draw_rect(fitz.Rect(rect.x0 - 1, rect.y0 - 1, rect.x1 + 1, rect.y1 + 1),
                    color=bg, fill=bg, width=0)
     page.insert_text((rect.x0, rect.y1 - 1.0), new_text,

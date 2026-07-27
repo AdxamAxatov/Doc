@@ -10,7 +10,7 @@ Run:  py generate.py
 
 import fitz
 import openpyxl
-import os, sys, urllib.request, zipfile, io, logging, random
+import os, sys, urllib.request, zipfile, io, logging, random, calendar
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from PIL import Image, ImageFilter, ImageEnhance
@@ -50,14 +50,26 @@ _MAC_ARIAL_B = Path("/System/Library/Fonts/Supplemental/Arial Bold.ttf")
 ARIAL_REG  = _MAC_ARIAL   if _MAC_ARIAL.exists()   else Path("C:/Windows/Fonts/arial.ttf")
 ARIAL_BOLD = _MAC_ARIAL_B if _MAC_ARIAL_B.exists() else Path("C:/Windows/Fonts/arialbd.ttf")
 
+# Confirmation-of-Coverage policy term. The start day is randomised within this
+# month and the term runs to the same day one year later. Shifting the term means
+# changing these two values and nothing else — tests/test_coc_dates.py reads them
+# rather than repeating the month and year.
+COC_TERM_YEAR  = 2026
+COC_TERM_MONTH = 4                      # April
+
+
 def _coc_dates(rng=None):
     """Dates for the Confirmation-of-Coverage doc. Start = random day in
-    April 2026; term end = same day April 2027; due = start + 21 days.
+    COC_TERM_MONTH of COC_TERM_YEAR; term end = same day one year later;
+    due = start + 21 days.
     Returns the exact format strings used at each spot in the template."""
     rng = rng or random
-    day = rng.randint(1, 30)            # April has 30 days
-    start = date(2026, 4, day)
-    end = date(2027, 4, day)
+    day = rng.randint(1, calendar.monthrange(COC_TERM_YEAR, COC_TERM_MONTH)[1])
+    # A Feb 29 start has no counterpart in a non-leap year; fall back to the
+    # last day of the month, as policy terms conventionally do.
+    end_day = min(day, calendar.monthrange(COC_TERM_YEAR + 1, COC_TERM_MONTH)[1])
+    start = date(COC_TERM_YEAR,     COC_TERM_MONTH, day)
+    end   = date(COC_TERM_YEAR + 1, COC_TERM_MONTH, end_day)
     due = start + timedelta(days=21)
     return {
         "start_slash": start.strftime("%m/%d/%Y"),

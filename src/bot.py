@@ -32,6 +32,7 @@ from generate import (
     PROJECT_DIR, OUTPUT_DIR, TEMPLATE_PDF,
     FONT_REG, FONT_BOLD, logger,
 )
+from validation import looks_like_company, looks_like_address
 
 # ─── COMPANY DATABASE ────────────────────────────────────────────────────────
 
@@ -93,8 +94,69 @@ COC_NAME, COC_PICK, COC_ADDR, COC_SCAN = range(20, 24)
 CW_NAME, CW_PICK, CW_USDOT, CW_ADDR, CW_SCAN = range(30, 35)
 
 YES_NO = ReplyKeyboardMarkup([["Yes", "No"]], one_time_keyboard=True, resize_keyboard=True)
+USE_ANYWAY = ReplyKeyboardMarkup([["Use it anyway"], ["Try again"]],
+                                 one_time_keyboard=True, resize_keyboard=True)
 
 # ─── HELPERS ──────────────────────────────────────────────────────────────────
+
+async def check_field(update, ctx, validator, slot, prompt):
+    """
+    Validate one free-text answer before the caller acts on it.
+
+    Returns the value to use, or None when a re-prompt has already been sent and
+    the caller should return its own conversation state unchanged.
+
+    Bookkeeping lives in ctx.user_data under two keys derived from `slot`:
+      _pend_<slot>  the most recently rejected value, held so it can be forced through
+      _rej_<slot>   how many times this field has been rejected
+
+    The override buttons arrive as ordinary text inside the state the caller
+    already returned, so no new conversation states are needed.
+    """
+    text = update.message.text.strip()
+    pend_key, rej_key = f"_pend_{slot}", f"_rej_{slot}"
+    user = update.effective_user.first_name
+
+    if text.lower() == "use it anyway":
+        pending = ctx.user_data.pop(pend_key, None)
+        ctx.user_data.pop(rej_key, None)
+        if pending:
+            logger.info(f'[{user}] Override accepted {slot}: "{pending}"')
+            return pending
+        await update.message.reply_text(prompt, reply_markup=ReplyKeyboardRemove())
+        return None
+
+    if text.lower() == "try again":
+        ctx.user_data.pop(pend_key, None)
+        ctx.user_data.pop(rej_key, None)
+        await update.message.reply_text(prompt, reply_markup=ReplyKeyboardRemove())
+        return None
+
+    err = validator(text)
+    if err is None:
+        ctx.user_data.pop(pend_key, None)
+        ctx.user_data.pop(rej_key, None)
+        return text
+
+    strikes = ctx.user_data.get(rej_key, 0) + 1
+    ctx.user_data[rej_key] = strikes
+    ctx.user_data[pend_key] = text
+    logger.info(f'[{user}] Rejected {slot} (strike {strikes}): "{text}"')
+    if strikes >= 2:
+        await update.message.reply_text(f"{err}\n\nUse it anyway?",
+                                        reply_markup=USE_ANYWAY)
+    else:
+        await update.message.reply_text(err, reply_markup=ReplyKeyboardRemove())
+    return None
+
+def _clear_validation_state(ctx):
+    """Drop every field's strike count and pending value.
+
+    ConversationHandler.END does not clear user_data, so without this a
+    rejected value could be forced into a later, unrelated conversation.
+    """
+    for key in [k for k in ctx.user_data if k.startswith(("_rej_", "_pend_"))]:
+        ctx.user_data.pop(key, None)
 
 def make_pdf(company: str, usdot: str, address: str, policy: str) -> Path:
     """Generate one PDF and return its path."""
@@ -156,6 +218,7 @@ async def cmd_setpolicy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Policy set to {args[0].strip()}")
 
 async def cmd_new(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    _clear_validation_state(ctx)
     ctx.user_data["companies"] = []
     await update.message.reply_text(
         "What's the company name?",
@@ -164,7 +227,9 @@ async def cmd_new(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ASK_NAME
 
 async def got_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.message.text.strip()
+    query = await check_field(update, ctx, looks_like_company, "name", "What's the company name?")
+    if query is None:
+        return ASK_NAME
     user = update.effective_user.first_name
     logger.info(f"[{user}] Search: \"{query}\"")
     results = search_companies(query)
@@ -246,7 +311,10 @@ async def got_usdot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ASK_ADDR
 
 async def got_addr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data["current"]["address"] = update.message.text.strip()
+    address = await check_field(update, ctx, looks_like_address, "addr", "Physical address?")
+    if address is None:
+        return ASK_ADDR
+    ctx.user_data["current"]["address"] = address
     n = add_company(ctx, ctx.user_data.pop("current"))
     await update.message.reply_text(
         f"Company {n} added. Add another?",
@@ -354,6 +422,7 @@ async def got_scan_no(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ─── UTILITY BILL HANDLERS ───────────────────────────────────────────────────
 
 async def cmd_utility(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    _clear_validation_state(ctx)
     await update.message.reply_text(
         "Utility bill generator\n\nCompany name?",
         reply_markup=ReplyKeyboardRemove()
@@ -382,7 +451,9 @@ async def _ut_generate_and_send(update, ctx, company, address):
         return ConversationHandler.END
 
 async def got_ut_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.message.text.strip()
+    query = await check_field(update, ctx, looks_like_company, "ut_name", "Company name?")
+    if query is None:
+        return UT_NAME
     user = update.effective_user.first_name
     logger.info(f"[{user}] Utility search: \"{query}\"")
     results = search_companies(query)
@@ -436,8 +507,10 @@ async def got_ut_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return UT_PICK
 
 async def got_ut_addr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    address = await check_field(update, ctx, looks_like_address, "ut_addr", "Enter the address:")
+    if address is None:
+        return UT_ADDR
     company = ctx.user_data["ut_company"]
-    address = update.message.text.strip()
     return await _ut_generate_and_send(update, ctx, company, address)
 
 async def got_ut_scan_yes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -467,6 +540,7 @@ async def got_ut_scan_no(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ─── CONFIRMATION OF COVERAGE HANDLERS ───────────────────────────────────────
 
 async def cmd_coc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    _clear_validation_state(ctx)
     await update.message.reply_text(
         "Confirmation of Coverage generator\n\nCompany name?",
         reply_markup=ReplyKeyboardRemove()
@@ -494,7 +568,9 @@ async def _coc_generate_and_send(update, ctx, company, address):
         return ConversationHandler.END
 
 async def got_coc_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.message.text.strip()
+    query = await check_field(update, ctx, looks_like_company, "coc_name", "Company name?")
+    if query is None:
+        return COC_NAME
     user = update.effective_user.first_name
     logger.info(f"[{user}] CoC search: \"{query}\"")
     results = search_companies(query)
@@ -536,8 +612,10 @@ async def got_coc_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return COC_PICK
 
 async def got_coc_addr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    address = await check_field(update, ctx, looks_like_address, "coc_addr", "Enter the address:")
+    if address is None:
+        return COC_ADDR
     company = ctx.user_data["coc_company"]
-    address = update.message.text.strip()
     return await _coc_generate_and_send(update, ctx, company, address)
 
 async def got_coc_scan_yes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -570,6 +648,7 @@ async def got_coc_scan_no(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # counter, and scannify_to_pdf() for the full-document scan.
 
 async def cmd_coverwhale(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    _clear_validation_state(ctx)
     await update.message.reply_text(
         "Cover Whale policy generator (full document)\n\nCompany name?",
         reply_markup=ReplyKeyboardRemove()
@@ -599,7 +678,9 @@ async def _cw_generate_and_send(update, ctx, company, usdot, address):
         return ConversationHandler.END
 
 async def got_cw_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.message.text.strip()
+    query = await check_field(update, ctx, looks_like_company, "cw_name", "Company name?")
+    if query is None:
+        return CW_NAME
     user = update.effective_user.first_name
     logger.info(f"[{user}] Cover Whale search: \"{query}\"")
     results = search_companies(query)
@@ -646,9 +727,11 @@ async def got_cw_usdot(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return CW_ADDR
 
 async def got_cw_addr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    address = await check_field(update, ctx, looks_like_address, "cw_addr", "Physical address?")
+    if address is None:
+        return CW_ADDR
     company = ctx.user_data["cw_company"]
     usdot = ctx.user_data.get("cw_usdot", "")
-    address = update.message.text.strip()
     return await _cw_generate_and_send(update, ctx, company, usdot, address)
 
 async def got_cw_scan_yes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -714,6 +797,7 @@ async def handle_pdf_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ─── GENERAL ──────────────────────────────────────────────────────────────────
 
 async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    _clear_validation_state(ctx)
     await update.message.reply_text("Cancelled.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 

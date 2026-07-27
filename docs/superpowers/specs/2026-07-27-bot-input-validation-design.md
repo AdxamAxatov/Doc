@@ -84,6 +84,15 @@ def looks_like_address(s: str) -> str | None
 - contains an email address
 - contains a URL (`http://`, `https://`, or `www.`)
 - contains no letters at all
+- looks like a mailing address — contains a 5-digit ZIP, or a comma followed by
+  a US state abbreviation as a whole word (`, TX`, `, FL`)
+
+The address-shape rule closes the other half of the reported swap. Without it,
+an address typed at the company-name prompt sails through: all 16,742 real
+Physical Address values in `All Companies.csv` were accepted as company names.
+The rule reuses `STATE_RE`'s alternation rather than duplicating the state list,
+and its word boundaries keep it off legitimate names — `SMITH, INC` does not
+match via `IN`, `ACME, DELIVERY LLC` does not match via `DE`.
 
 A "more digits than letters" rule was drafted and then dropped: it wrongly
 rejected the real companies `7573 LLC` and `1524 INC`, and caught nothing that
@@ -109,8 +118,13 @@ companies) before this spec was finalized:
 
 | Check | Rows rejected |
 | --- | --- |
-| `looks_like_company` over every Legal Name | 0 |
-| `looks_like_address` over every Physical Address | 0 |
+| `looks_like_company` over every Legal Name | 0 of 16,742 |
+| `looks_like_address` over every Physical Address | 0 of 16,742 |
+| `looks_like_company` over every Physical Address (should reject) | 16,544 of 16,742 (98.8%) |
+
+The first two rows are the false-positive bar: no real record is ever blocked.
+The third measures the address-shape rule catching an address typed at the
+company-name prompt.
 
 Every incident and control string behaves correctly. Rejected:
 `daylenis@leoempireservicesllc.com` and `www.leoempire.com` as companies;
@@ -135,6 +149,14 @@ State is kept in `ctx.user_data` under two keys derived from `slot`:
 
 - `_pend_<slot>` — the most recently rejected value, held so it can be forced through
 - `_rej_<slot>` — how many times this field has been rejected this conversation
+
+`ConversationHandler.END` does not clear `ctx.user_data`, so "this conversation"
+has to be enforced explicitly. `_clear_validation_state(ctx)` drops every
+`_rej_*` / `_pend_*` key and is called from `cmd_cancel` **and** all four entry
+points — re-issuing `/utility` mid-conversation restarts without passing through
+`cmd_cancel`. Without this, a value rejected in a cancelled conversation could be
+forced into a later, unrelated document via `Use it anyway`: the same
+silent-wrong-data failure this design exists to prevent.
 
 Logic:
 

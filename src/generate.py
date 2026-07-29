@@ -10,7 +10,7 @@ Run:  py generate.py
 
 import fitz
 import openpyxl
-import os, sys, urllib.request, zipfile, io, logging, random, calendar
+import os, sys, urllib.request, zipfile, io, logging, random, calendar, inspect
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from PIL import Image, ImageFilter, ImageEnhance
@@ -589,6 +589,35 @@ def _paint_plans(page, plans, pix, color=None, font_reg=None, fontname_tag=None,
         page.insert_text((x, y), new_text, fontfile=fp, fontname=fnm, fontsize=sz, color=text_color)
 
 
+def _accepted_opts(fn, skip):
+    """Keyword names `fn` names explicitly, ignoring its catch-all **kwargs."""
+    return {name for name, p in inspect.signature(fn).parameters.items()
+            if name not in skip and p.kind is not p.VAR_KEYWORD}
+
+
+# The union of what planning and painting accept. Derived from the signatures so
+# it cannot drift as either side gains an option.
+REPLACE_OPTS = (_accepted_opts(_plan_replacement, {"page", "old_text", "new_text"})
+                | _accepted_opts(_paint_plans, {"page", "plans", "pix"}))
+
+
+def _check_opts(kw, caller):
+    """Reject unknown options.
+
+    replace_on_page takes **kw and hands the same dict to both _plan_replacement
+    and _paint_plans, each of which absorbs the other's keywords through a
+    catch-all. That means a misspelling — colour= for color=, say — is accepted
+    in silence and the option simply never applies. There are 30-odd call sites
+    where colour and position are load-bearing, so a typo must fail loudly.
+    """
+    unknown = sorted(set(kw) - REPLACE_OPTS)
+    if unknown:
+        raise TypeError(
+            f"{caller}() got unexpected keyword argument(s) {unknown}. "
+            f"Accepted: {sorted(REPLACE_OPTS)}"
+        )
+
+
 def replace_on_page(page, old_text, new_text, pix=None, **kw):
     """
     Find every occurrence of old_text on page that passes the x/y filters,
@@ -617,6 +646,7 @@ def replace_on_page(page, old_text, new_text, pix=None, **kw):
                   is better off with cover=False — the rectangle is what bleeds
                   into the neighbouring row, not the text.
     """
+    _check_opts(kw, "replace_on_page")
     plans = _plan_replacement(page, old_text, new_text, **kw)
     if not plans:
         return
@@ -638,8 +668,10 @@ def replace_many(page, fields, pix=None, **common):
     `fields` is a sequence of (old_text, new_text, overrides) triples; each
     overrides dict is merged over `common`.
     """
+    _check_opts(common, "replace_many")
     batches = []
     for old, new, kw in fields:
+        _check_opts(kw, f"replace_many field {old!r}")
         opts = {**common, **kw}
         plans = _plan_replacement(page, old, new, **opts)
         if plans:

@@ -50,6 +50,18 @@ _MAC_ARIAL_B = Path("/System/Library/Fonts/Supplemental/Arial Bold.ttf")
 ARIAL_REG  = _MAC_ARIAL   if _MAC_ARIAL.exists()   else Path("C:/Windows/Fonts/arial.ttf")
 ARIAL_BOLD = _MAC_ARIAL_B if _MAC_ARIAL_B.exists() else Path("C:/Windows/Fonts/arialbd.ttf")
 
+
+def _sys_font(*candidates, fallback):
+    """First existing path among `candidates`, else `fallback`.
+
+    Lets a document name the system font it wants on both macOS and Windows
+    without the module failing to import on whichever machine lacks it.
+    """
+    for c in candidates:
+        if Path(c).exists():
+            return Path(c)
+    return fallback
+
 # Confirmation-of-Coverage policy term. The start day is randomised within this
 # month and the term runs to the same day one year later. Shifting the term means
 # changing these two values and nothing else — tests/test_coc_dates.py reads them
@@ -86,6 +98,40 @@ UT_NAME    = "IVORY JULIUS CHRISTOPHER"
 UT_ADDR1   = "10318 CHEEVES,"
 UT_ADDR2   = "HOUSTON, TX 77016"
 
+# ─── NGANGA CONFIG (Motor Carrier Liability Declaration Page) ────────────────
+# Professional Transportation Risk Retention Group — 2-page declaration.
+# Every replaced field on this template is Calibri / Calibri-Bold at 11.04pt.
+NGANGA_TEMPLATE = ASSETS_DIR / "template" / "Pricely Fane LLC_Policy_040226_unlocked-1-2.pdf"
+NGANGA_POLICY   = "PT-26042618-01"
+
+# Calibri ships with Windows and with Microsoft Office on macOS; fall back to
+# Arial (metrically closer than DejaVu) so a machine without it still renders.
+CALIBRI_REG  = _sys_font("/Library/Fonts/Microsoft/Calibri.ttf",
+                         "/Library/Fonts/Calibri.ttf",
+                         str(Path.home() / "Library/Fonts/Calibri.ttf"),
+                         "C:/Windows/Fonts/calibri.ttf", fallback=ARIAL_REG)
+CALIBRI_BOLD = _sys_font("/Library/Fonts/Microsoft/Calibri Bold.ttf",
+                         "/Library/Fonts/Calibrib.ttf",
+                         str(Path.home() / "Library/Fonts/Calibri Bold.ttf"),
+                         "C:/Windows/Fonts/calibrib.ttf", fallback=ARIAL_BOLD)
+
+NG_COMPANY = "Pricely Fane LLC"
+NG_ADDR1   = "5270 Millenia Blvd"
+NG_ADDR2   = "Orlando, FL 32839-5636"
+NG_VIN     = "3AKJGLD50GSGY1387"
+NG_YEAR    = "2016"
+NG_DRIVER  = "Pricely Gracius"
+NG_DOB     = "10/3/1998"
+NG_STATE   = "FL"
+NG_LICENSE = "G611610943000"
+NG_PREPARED = "5/7/2026"      # footer date — its own span, label is separate
+NG_PERIOD   = "5/7/2026 12:01 AM to 5/7/2027 12:00 AM"
+
+NG_FONTSIZE     = 11.04   # every replaced field on this template
+NG_RIGHT_EDGE   = 540.0   # visible right edge the two header lines align to
+NG_LOGO_RIGHT_X = 230.0   # letterhead logo bbox ends x222.7 — header must clear it
+NG_BOX_RIGHT_X  = 536.0   # inner right edge of the page-1 value boxes (border 539.5)
+
 # ─── CONFIRMATION OF COVERAGE CONFIG ─────────────────────────────────────────
 COC_TEMPLATE = ASSETS_DIR / "template" / "1 GUY 1 GIRL 1 TRUCK LLC new insurance.pdf"
 COC_NAME_P1  = "SAFE ROAD FREIGHT INC"        # page 1 cover-sheet sample company
@@ -96,16 +142,10 @@ COC_ADDR2    = "OAK PARK, IL 60302"           # page 2 mailing address line 2
 # Exact fonts/sizes/colors read from the template's own text spans:
 #   page 1  company = Arial-BoldMT 22pt #171717 ; date = Arial-Black 16pt #171717 (centered)
 #   pages 2-4 values = DejaVuSans 10pt black ; page 5 values = DejaVuSans 9pt black
-def _coc_font(*candidates, fallback):
-    for c in candidates:
-        if Path(c).exists():
-            return Path(c)
-    return fallback
-
 COC_FONT_BODY  = ASSETS_DIR / "DejaVuSans.ttf"  # pages 2-5 values
-COC_FONT_TITLE = _coc_font("/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+COC_FONT_TITLE = _sys_font("/System/Library/Fonts/Supplemental/Arial Bold.ttf",
                            "C:/Windows/Fonts/arialbd.ttf", fallback=COC_FONT_BODY)
-COC_FONT_DATE1 = _coc_font("/System/Library/Fonts/Supplemental/Arial Black.ttf",
+COC_FONT_DATE1 = _sys_font("/System/Library/Fonts/Supplemental/Arial Black.ttf",
                            "C:/Windows/Fonts/ariblk.ttf", fallback=COC_FONT_BODY)
 COC_CLR_DARK  = (0x17 / 255.0, 0x17 / 255.0, 0x17 / 255.0)  # #171717
 COC_CLR_BLACK = (0.0, 0.0, 0.0)
@@ -188,6 +228,137 @@ def increment_policy(p: str) -> str:
     return f"{prefix}{int(digits)+1:0{len(digits)}d}"
 
 
+def increment_nganga_policy(p: str) -> str:
+    """
+    Increment only the middle block of a PT-style policy number.
+    "PT-26042618-01" -> "PT-26042619-01"
+
+    increment_policy() cannot be used here: it strips every digit in the
+    string, so the trailing "-01" would be folded into the counter and
+    "PT-26042618-01" would become "PT--2604261802".
+    """
+    parts = p.split("-")
+    if len(parts) != 3 or not parts[1].isdigit():
+        raise ValueError(f"Unexpected policy format: {p!r} (want PT-NNNNNNNN-NN)")
+    parts[1] = f"{int(parts[1])+1:0{len(parts[1])}d}"
+    return "-".join(parts)
+
+
+# ─── RANDOMISED FIELD GENERATORS (Nganga declaration page) ───────────────────
+
+VIN_LETTERS = "ABCDEFGHJKLMNPRSTUVWXYZ"   # I, O and Q never appear in a VIN
+
+VIN_YEAR_CODE = {2014: "E", 2015: "F", 2016: "G",
+                 2017: "H", 2018: "J", 2019: "K"}   # VIN position 10
+
+_VIN_TRANS = {**{str(d): d for d in range(10)},
+              "A": 1, "B": 2, "C": 3, "D": 4, "E": 5, "F": 6, "G": 7, "H": 8,
+              "J": 1, "K": 2, "L": 3, "M": 4, "N": 5, "P": 7, "R": 9,
+              "S": 2, "T": 3, "U": 4, "V": 5, "W": 6, "X": 7, "Y": 8, "Z": 9}
+_VIN_WEIGHTS = [8, 7, 6, 5, 4, 3, 2, 10, 0, 9, 8, 7, 6, 5, 4, 3, 2]
+
+
+def vin_check_digit(vin17: str) -> str:
+    """Standard NHTSA check digit for position 9. Returns '0'-'9' or 'X'."""
+    total = sum(_VIN_TRANS[c] * w for c, w in zip(vin17.upper(), _VIN_WEIGHTS))
+    r = total % 11
+    return "X" if r == 10 else str(r)
+
+
+def random_year(lo: int = 2014, hi: int = 2019, rng=None) -> int:
+    return (rng or random).randint(lo, hi)
+
+
+def random_vin(year: int, wmi: str = "3AK", rng=None) -> str:
+    """
+    Build a valid-looking VIN for the given model year.
+
+    Mirrors the character-class pattern of the template's VIN
+    (3AKJGLD50GSGY1387):  3AK  LLLL D  [check]  [year]  L  LL DDDD
+
+    The WMI stays fixed so the VIN keeps agreeing with the Make column
+    ("Freightliner"), position 10 encodes the year so it cannot contradict the
+    Year column, and position 9 is a real check digit.
+    """
+    rng = rng or random
+    if year not in VIN_YEAR_CODE:
+        raise ValueError(f"No VIN year code for {year} (supported: {sorted(VIN_YEAR_CODE)})")
+
+    vds   = "".join(rng.choice(VIN_LETTERS) for _ in range(4)) + str(rng.randint(0, 9))
+    plant = rng.choice(VIN_LETTERS)
+    seq   = "".join(rng.choice(VIN_LETTERS) for _ in range(2)) + \
+            "".join(str(rng.randint(0, 9)) for _ in range(4))
+
+    vin = f"{wmi}{vds}0{VIN_YEAR_CODE[year]}{plant}{seq}"   # '0' = check placeholder
+    return vin[:8] + vin_check_digit(vin) + vin[9:]
+
+
+def random_dob(min_age: int = 25, max_age: int = 49, today: date = None, rng=None) -> str:
+    """
+    Random date of birth for someone between min_age and max_age years old.
+    Formatted M/D/YYYY to match the template ("10/3/1998").
+    """
+    rng = rng or random
+    today = today or date.today()
+    newest = today - timedelta(days=int(min_age * 365.25))
+    oldest = today - timedelta(days=int((max_age + 1) * 365.25) - 1)
+    dob = oldest + timedelta(days=rng.randint(0, (newest - oldest).days))
+    return f"{dob.month}/{dob.day}/{dob.year}"
+
+
+# Driver-licence formats. 'N' = digit, 'L' = random letter,
+# '#' = first letter of the driver's surname (states that encode it).
+LICENSE_FORMATS = {
+    "AL": "NNNNNNN",       "AK": "NNNNNNN",       "AZ": "LNNNNNNNN",
+    "AR": "NNNNNNNNN",     "CA": "LNNNNNNN",      "CO": "NNNNNNNNN",
+    "CT": "NNNNNNNNN",     "DE": "NNNNNNN",       "DC": "NNNNNNN",
+    "FL": "#NNNNNNNNNNNN", "GA": "NNNNNNNNN",     "HI": "LNNNNNNNN",
+    "ID": "LLNNNNNNL",     "IL": "#NNNNNNNNNNN",  "IN": "NNNNNNNNNN",
+    "IA": "NNNNNNNNN",     "KS": "LNNNNNNNN",     "KY": "#NNNNNNNN",
+    "LA": "NNNNNNNNN",     "ME": "NNNNNNN",       "MD": "#NNNNNNNNNNNN",
+    "MA": "LNNNNNNNN",     "MI": "#NNNNNNNNNNNN", "MN": "#NNNNNNNNNNNN",
+    "MS": "NNNNNNNNN",     "MO": "NNNNNNNNN",     "MT": "NNNNNNNNN",
+    "NE": "LNNNNNNNN",     "NV": "NNNNNNNNNN",    "NH": "NNNNNNNNNN",
+    "NJ": "#NNNNNNNNNNNNNN", "NM": "NNNNNNNNN",   "NY": "NNNNNNNNN",
+    "NC": "NNNNNNNNN",     "ND": "NNNNNNNNN",     "OH": "LLNNNNNN",
+    "OK": "LNNNNNNNNN",    "OR": "NNNNNNNNN",     "PA": "NNNNNNNN",
+    "RI": "NNNNNNN",       "SC": "NNNNNNNNN",     "SD": "NNNNNNNN",
+    "TN": "NNNNNNNNN",     "TX": "NNNNNNNN",      "UT": "NNNNNNNNN",
+    "VT": "NNNNNNNN",      "VA": "#NNNNNNNN",     "WA": "#NNNNNNNNNNN",
+    "WV": "NNNNNNN",       "WI": "#NNNNNNNNNNNNN", "WY": "NNNNNNNNN",
+}
+
+
+def random_state(rng=None) -> str:
+    return (rng or random).choice(sorted(LICENSE_FORMATS))
+
+
+def random_license(state: str, last_name: str = "", rng=None) -> str:
+    """
+    Build a licence number in the given state's format. Where the state encodes
+    the holder's surname initial (FL, MI, MD, NJ, ...), that letter comes from
+    last_name so the number agrees with the driver's name.
+    """
+    rng = rng or random
+    fmt = LICENSE_FORMATS.get(state.upper())
+    if not fmt:
+        raise ValueError(f"No licence format for state {state!r}")
+
+    initial = (last_name.strip()[:1] or rng.choice(VIN_LETTERS)).upper()
+    if not initial.isalpha():
+        initial = rng.choice(VIN_LETTERS)
+
+    out = []
+    for ch in fmt:
+        if ch == "N":
+            out.append(str(rng.randint(0, 9)))
+        elif ch == "L":
+            out.append(rng.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+        elif ch == "#":
+            out.append(initial)
+    return "".join(out)
+
+
 def split_address(addr: str):
     """
     Split address into (street, city_state_zip).
@@ -234,6 +405,45 @@ def sample_bg(pix, rect, pw, ph):
         return (1.0, 1.0, 1.0)
 
 
+def merge_hits(hits, x_gap=4.0):
+    """
+    Merge search_for() rects that are fragments of a single run of text.
+
+    search_for splits a match wherever glyph heights change — in a date like
+    "5/7/2026" the slashes are taller than the digits, so one match comes back
+    as 8 rects. Left unmerged the replacement is drawn once per fragment.
+    """
+    if not hits:
+        return []
+
+    def joins(a, b):
+        return (min(a.y1, b.y1) - max(a.y0, b.y0) > 0 and
+                b.x0 <= a.x1 + x_gap and a.x0 <= b.x1 + x_gap)
+
+    groups = []
+    for r in sorted(hits, key=lambda r: r.x0):
+        for i, g in enumerate(groups):
+            if joins(g, r):
+                groups[i] = g | r
+                break
+        else:
+            groups.append(fitz.Rect(r))
+
+    # Unioning can bring two groups into contact, so consolidate until stable.
+    merged = True
+    while merged:
+        merged = False
+        for i in range(len(groups)):
+            for j in range(i + 1, len(groups)):
+                if joins(groups[i], groups[j]):
+                    groups[i] |= groups.pop(j)
+                    merged = True
+                    break
+            if merged:
+                break
+    return groups
+
+
 def _strip_text(page, rects):
     """Delete the text inside `rects` from the page's content stream.
 
@@ -262,30 +472,30 @@ def _strip_text(page, rects):
                           graphics=fitz.PDF_REDACT_LINE_ART_NONE)
 
 
-def replace_on_page(page, old_text, new_text, pix=None,
-                    fontsize=None, bold=False, center=False,
-                    cell_center_x=None, cell_right_x=None, cell_left_x=None,
-                    cell_bounds=None,
-                    top_right_x=None,
-                    x_min=None, x_max=None,
-                    y_min=None, y_max=None,
-                    color=None,
-                    font_reg=None, font_bold=None):
+def _plan_replacement(page, old_text, new_text,
+                      fontsize=None, bold=False, center=False,
+                      cell_center_x=None, cell_right_x=None, cell_left_x=None,
+                      cell_bounds=None,
+                      top_right_x=None,
+                      x_min=None, x_max=None,
+                      y_min=None, y_max=None,
+                      font_reg=None, font_bold=None,
+                      merge=False, fit_left_x=None, fit_right_x=None,
+                      min_fontsize=6.5, **_painting_opts):
     """
-    Find every occurrence of old_text on page that passes the x/y filters,
-    delete it, cover it with a filled rectangle matching the background, then
-    write new_text at the correct position.
+    Work out where and how each occurrence of old_text will be rewritten.
 
-    Runs in two passes: every replacement is worked out first, the original
-    text is stripped in a single redaction pass, and only then is anything
-    painted. The new text has to be written after the redaction — writing it
-    first would strip it along with the original.
+    Returns a list of (rect, x, y, size, fontfile, use_bold, new_text) and
+    changes nothing. Planning is split from painting so several fields can be
+    stripped in one redaction pass before any of them is drawn.
     """
     hits = page.search_for(old_text)
     if not hits:
-        return
+        return []
+    if merge:
+        hits = merge_hits(hits)
 
-    pw, ph = page.rect.width, page.rect.height
+    pw = page.rect.width
 
     plans = []
     for rect in hits:
@@ -308,6 +518,18 @@ def replace_on_page(page, old_text, new_text, pix=None,
         fp       = str(f_bold if use_bold else f_reg)
         font_obj = fitz.Font(fontfile=fp)
         tw       = font_obj.text_length(new_text, fontsize=sz)
+
+        # ── shrink to fit ────────────────────────────────────────────────────
+        avail = None
+        if fit_left_x is not None:
+            right = (cell_right_x if cell_right_x is not None else
+                     top_right_x  if top_right_x  is not None else rect.x1)
+            avail = right - fit_left_x
+        elif fit_right_x is not None:
+            avail = fit_right_x - rect.x0
+        if avail is not None and avail > 0 and tw > avail:
+            sz = max(min_fontsize, sz * avail / tw)
+            tw = font_obj.text_length(new_text, fontsize=sz)
 
         if use_center:
             # Large bold title — center across full page width
@@ -338,28 +560,97 @@ def replace_on_page(page, old_text, new_text, pix=None,
             x = rect.x0
 
         y = rect.y1 - 1.0          # baseline just inside the bottom of the bbox
-        plans.append((rect, x, y, sz, fp, use_bold))
+        plans.append((rect, x, y, sz, fp, use_bold, new_text))
 
-    if not plans:
-        return
+    return plans
 
-    # ── delete the original text, then repaint over where it was ─────────────
-    _strip_text(page, [p[0] for p in plans])
 
-    for rect, x, y, sz, fp, use_bold in plans:
+def _paint_plans(page, plans, pix, color=None, font_reg=None, fontname_tag=None,
+                 cover=True, **_planning_opts):
+    """Draw planned replacements. Must run after _strip_text, never before."""
+    pw, ph = page.rect.width, page.rect.height
+
+    for rect, x, y, sz, fp, use_bold, new_text in plans:
         # ── cover old text with a rectangle matching the actual background ──
-        bg = sample_bg(pix, rect, pw, ph)
-        cover = fitz.Rect(rect.x0 - 1.0, rect.y0 - 1.0,
-                          rect.x1 + 1.0, rect.y1 + 1.0)
-        page.draw_rect(cover, color=bg, fill=bg, width=0)
+        if cover:
+            bg = sample_bg(pix, rect, pw, ph)
+            cover_rect = fitz.Rect(rect.x0 - 1.0, rect.y0 - 1.0,
+                                   rect.x1 + 1.0, rect.y1 + 1.0)
+            page.draw_rect(cover_rect, color=bg, fill=bg, width=0)
 
         # ── write new text on top ─────────────────────────────────────────────
-        if font_reg is not None:
+        if fontname_tag is not None:
+            fnm = f"{fontname_tag}Bd" if use_bold else fontname_tag
+        elif font_reg is not None:
             fnm = "ArialBd" if use_bold else "Arial"
         else:
             fnm = "DejaVuSCBd" if use_bold else "DejaVuSC"
         text_color = color if color is not None else (0, 0, 0)
         page.insert_text((x, y), new_text, fontfile=fp, fontname=fnm, fontsize=sz, color=text_color)
+
+
+def replace_on_page(page, old_text, new_text, pix=None, **kw):
+    """
+    Find every occurrence of old_text on page that passes the x/y filters,
+    delete it, cover it with a filled rectangle matching the background, then
+    write new_text at the correct position.
+
+    Runs in two passes: every replacement is worked out first, the original
+    text is stripped in a single redaction pass, and only then is anything
+    painted. The new text has to be written after the redaction — writing it
+    first would strip it along with the original.
+
+    Keyword arguments beyond `pix` are split between _plan_replacement and
+    _paint_plans; the notable additions are:
+
+    fontname_tag  explicit CMap tag so each font family stays distinct; without
+                  it any custom font is tagged "Arial", which collides once more
+                  than one non-DejaVu family is embedded.
+    merge         union hits that are fragments of one run. search_for splits a
+                  match wherever glyph heights change, so a date like "5/7/2026"
+                  comes back as 8 rects and would be replaced 8 times.
+    fit_left_x    shrink until right-aligned text clears an obstacle on its left.
+    fit_right_x   shrink until left-aligned text stays inside its table cell.
+    cover         paint the background rectangle. Redaction already removes the
+                  old text and preserves the shading under it, so a template
+                  whose rows are closer together than their hit rects are tall
+                  is better off with cover=False — the rectangle is what bleeds
+                  into the neighbouring row, not the text.
+    """
+    plans = _plan_replacement(page, old_text, new_text, **kw)
+    if not plans:
+        return
+    _strip_text(page, [p[0] for p in plans])
+    _paint_plans(page, plans, pix, **kw)
+
+
+def replace_many(page, fields, pix=None, **common):
+    """
+    Replace several fields as a single unit.
+
+    replace_on_page redacts and repaints within one call, so two calls that
+    touch overlapping x-ranges on the same line will have the second call's
+    redaction delete text the first call has already written. On the Nganga
+    header that truncated the company name at exactly the x where the policy
+    number's rect began. Planning every field first, stripping once, and only
+    then painting removes the hazard.
+
+    `fields` is a sequence of (old_text, new_text, overrides) triples; each
+    overrides dict is merged over `common`.
+    """
+    batches = []
+    for old, new, kw in fields:
+        opts = {**common, **kw}
+        plans = _plan_replacement(page, old, new, **opts)
+        if plans:
+            batches.append((plans, opts))
+
+    if not batches:
+        return
+
+    _strip_text(page, [p[0] for plans, _ in batches for p in plans])
+    for plans, opts in batches:
+        _paint_plans(page, plans, pix, **opts)
 
 # ─── PAGE FILL FUNCTIONS ─────────────────────────────────────────────────────
 
@@ -815,6 +1106,164 @@ def generate_coverwhale(company: str, usdot: str, address: str, policy: str,
     doc.close()
     logger.info(f"Cover Whale full policy saved: {out.name}")
     return out
+
+
+# ─── NGANGA DECLARATION PAGE ─────────────────────────────────────────────────
+
+def _ng_fmt_date(d: date) -> str:
+    """M/D/YYYY with no leading zeros, matching the template."""
+    return f"{d.month}/{d.day}/{d.year}"
+
+
+def _ng_plus_one_year(d: date) -> date:
+    try:
+        return d.replace(year=d.year + 1)
+    except ValueError:          # Feb 29 -> Feb 28
+        return d.replace(year=d.year + 1, day=28)
+
+
+def _ng_common(**kw):
+    """
+    Shared options for every Nganga replacement.
+
+    cover=False throughout: the rows on this template are ~13.4pt apart while
+    their hit rects are ~14.8pt tall, so a background rectangle inevitably
+    bleeds into the neighbouring row — repainting white over the shaded Named
+    Insured band, or slicing the value written just above. Redaction already
+    removes the old text and leaves the shading untouched, so the rectangle is
+    pure downside here.
+    """
+    return {"fontsize": NG_FONTSIZE, "cover": False,
+            "font_reg": CALIBRI_REG, "font_bold": CALIBRI_BOLD,
+            "fontname_tag": "cali", **kw}
+
+
+def _ng_fitted_size(text, fontfile, avail, size=NG_FONTSIZE, min_size=6.5):
+    """Largest size up to `size` at which `text` fits within `avail` points."""
+    tw = fitz.Font(fontfile=str(fontfile)).text_length(text, fontsize=size)
+    return size if tw <= avail else max(min_size, size * avail / tw)
+
+
+def fill_nganga_header(page, company, policy, pix):
+    """Top-right block — identical on both pages, Calibri-Bold, right-aligned."""
+    name_line   = f"Named Insured:  {company}"
+    policy_line = f"Policy #: {policy}"
+
+    # Both lines grow leftward toward the letterhead logo. Size them together so
+    # a long company name never leaves the two header lines mismatched.
+    avail = NG_RIGHT_EDGE - NG_LOGO_RIGHT_X
+    sz = min(_ng_fitted_size(name_line,   CALIBRI_BOLD, avail),
+             _ng_fitted_size(policy_line, CALIBRI_BOLD, avail))
+
+    # These two lines overlap in x, so they must be stripped as one batch — a
+    # per-field call would let the policy rect's redaction eat the tail of the
+    # company name. y_max=60 keeps the page-1 body row (y196.8) out; it also
+    # matches "Named Insured:  <company>".
+    replace_many(page, [
+        (f"Named Insured:  {NG_COMPANY}", name_line,   dict(y_max=60)),
+        (f"Policy #: {NGANGA_POLICY}",    policy_line, dict(y_min=40, y_max=70)),
+    ], pix, **_ng_common(fontsize=sz, bold=True, cell_right_x=NG_RIGHT_EDGE))
+
+
+def fill_nganga_page1(page, company, addr1, addr2, policy, prepared, period, pix):
+    """Page 1 — named insured, mailing address, policy period, prepared date."""
+    fill_nganga_header(page, company, policy, pix)
+
+    # Value column starts x267.8. Guards bracket the measured hit rects
+    # (y196.8–211.5, 210.2–225.0, 223.6–238.4) — they must clear y1, not y0.
+    # These rows stack directly on top of one another and share an x-range, so
+    # they go through as one batch. merge=True on the dates: their slashes are
+    # taller than the digits, so search_for returns each as several fragments.
+    replace_many(page, [
+        (NG_COMPANY,  company,  dict(y_min=190, y_max=216)),
+        (NG_ADDR1,    addr1,    dict(y_min=206, y_max=229)),
+        (NG_ADDR2,    addr2,    dict(y_min=219, y_max=242)),
+        (NG_PERIOD,   period,   dict(y_min=245, y_max=270, merge=True)),
+        (NG_PREPARED, prepared, dict(y_min=706, y_max=735, merge=True)),
+    ], pix, **_ng_common(fit_right_x=NG_BOX_RIGHT_X))
+
+
+def fill_nganga_page2(page, company, policy, vin, year, driver,
+                      dob, state, license_no, prepared, pix):
+    """Page 2 — covered auto row and covered driver row."""
+    fill_nganga_header(page, company, policy, pix)
+
+    # Covered autos (rects y181.5–196.3), column borders x215.8 / 301.2.
+    # Covered drivers (rects y277.0–291.8), borders x197.8 / 287.8 / 355.2 / 427.2.
+    # The four driver cells share a line, so the whole page goes through as one
+    # batch. "FL" also occurs inside the "Florida ..." form names at y402–445,
+    # so the licence-state cell is pinned by x as well.
+    replace_many(page, [
+        (NG_VIN,      vin,        dict(y_min=175, y_max=200, fit_right_x=213.0)),
+        (NG_YEAR,     str(year),  dict(y_min=175, y_max=200, fit_right_x=298.0)),
+        (NG_DRIVER,   driver,     dict(y_min=270, y_max=296, fit_right_x=195.0)),
+        (NG_DOB,      dob,        dict(y_min=270, y_max=296, fit_right_x=352.0,
+                                       merge=True)),
+        (NG_STATE,    state,      dict(y_min=270, y_max=296, x_min=350,
+                                       fit_right_x=424.0)),
+        (NG_LICENSE,  license_no, dict(y_min=270, y_max=296, fit_right_x=536.0)),
+        (NG_PREPARED, prepared,   dict(y_min=706, y_max=735, merge=True)),
+    ], pix, **_ng_common())
+
+
+def generate_nganga(company: str, address: str, driver: str, policy: str,
+                    output_dir: Path = None, today: date = None, rng=None):
+    """
+    Generate a Motor Carrier Liability Declaration Page.
+
+    company / address  — from All Companies.csv, or entered manually
+    driver             — supplied by the user
+    policy             — caller-supplied, already incremented
+
+    VIN, model year, DOB, licence state and licence number are randomised.
+    Returns (pdf_path, details_dict).
+    """
+    if output_dir is None:
+        output_dir = OUTPUT_DIR
+    output_dir.mkdir(exist_ok=True)
+
+    rng     = rng or random
+    today   = today or date.today()
+    addr1, addr2 = split_address(address)
+    company = company.strip()
+    driver  = driver.strip()
+
+    # Year first — the VIN encodes it at position 10.
+    year       = random_year(rng=rng)
+    vin        = random_vin(year, rng=rng)
+    dob        = random_dob(today=today, rng=rng)
+    state      = random_state(rng=rng)
+    last_name  = driver.split()[-1] if driver.split() else ""
+    license_no = random_license(state, last_name, rng=rng)
+
+    prepared = _ng_fmt_date(today)
+    period   = (f"{_ng_fmt_date(today)} 12:01 AM to "
+                f"{_ng_fmt_date(_ng_plus_one_year(today))} 12:00 AM")
+
+    doc = fitz.open(NGANGA_TEMPLATE)
+
+    p = doc[0]; pix = p.get_pixmap(dpi=72)
+    fill_nganga_page1(p, company, addr1, addr2, policy, prepared, period, pix)
+
+    p = doc[1]; pix = p.get_pixmap(dpi=72)
+    fill_nganga_page2(p, company, policy, vin, year, driver,
+                      dob, state, license_no, prepared, pix)
+
+    safe = (company
+            .replace("/","-").replace("\\","-").replace(":","")
+            .replace("*","").replace("?","").replace('"',"")
+            .replace("<","").replace(">","").replace("|","")
+            .replace("'",""))
+    out = output_dir / f"{safe}_Policy_{today.strftime('%m%d%y')}.pdf"
+    doc.save(str(out), garbage=4, deflate=True)
+    doc.close()
+
+    details = {"policy": policy, "vin": vin, "year": year, "driver": driver,
+               "dob": dob, "state": state, "license": license_no,
+               "prepared": prepared, "period": period}
+    logger.info(f"Nganga saved: {out.name} | {policy} | VIN {vin} ({year}) | "
+                f"{driver} {dob} {state} {license_no}")
+    return out, details
 
 
 # ─── SCAN EFFECT ──────────────────────────────────────────────────────────────

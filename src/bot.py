@@ -29,6 +29,7 @@ from generate import (
     ensure_fonts, split_address, fill_page1, fill_page2,
     fill_page_header_only, increment_policy, scannify_pdf, scannify_to_pdf,
     generate_utility, generate_coc, generate_coverwhale,
+    generate_nganga, increment_nganga_policy, NGANGA_POLICY,
     PROJECT_DIR, OUTPUT_DIR, TEMPLATE_PDF,
     FONT_REG, FONT_BOLD, logger,
 )
@@ -74,17 +75,34 @@ def search_companies(query: str, max_results: int = 10):
 
 STATE_FILE = ASSETS_DIR / "policy_state.json"
 DEFAULT_POLICY = "CUS09116674"
+DEFAULT_NGANGA_POLICY = NGANGA_POLICY
 
-def load_policy() -> str:
+def _read_state() -> dict:
     if STATE_FILE.exists():
         try:
-            return json.loads(STATE_FILE.read_text())["policy"]
+            return json.loads(STATE_FILE.read_text())
         except Exception:
             pass
-    return DEFAULT_POLICY
+    return {}
+
+def _write_state(**updates):
+    """Merge into the existing state. The file holds more than one counter now,
+    so a blind overwrite would drop whichever one is not being saved."""
+    state = _read_state()
+    state.update(updates)
+    STATE_FILE.write_text(json.dumps(state))
+
+def load_policy() -> str:
+    return _read_state().get("policy", DEFAULT_POLICY)
 
 def save_policy(policy: str):
-    STATE_FILE.write_text(json.dumps({"policy": policy}))
+    _write_state(policy=policy)
+
+def load_nganga_policy() -> str:
+    return _read_state().get("nganga_policy", DEFAULT_NGANGA_POLICY)
+
+def save_nganga_policy(policy: str):
+    _write_state(nganga_policy=policy)
 
 # ─── CONVERSATION STATES ───────────────────────────────────────────────────────
 
@@ -92,6 +110,7 @@ ASK_NAME, ASK_PICK, ASK_USDOT, ASK_ADDR, ASK_MORE, ASK_SCAN = range(6)
 UT_NAME, UT_PICK, UT_ADDR, UT_SCAN = range(10, 14)
 COC_NAME, COC_PICK, COC_ADDR, COC_SCAN = range(20, 24)
 CW_NAME, CW_PICK, CW_USDOT, CW_ADDR, CW_SCAN = range(30, 35)
+NG_NAME, NG_PICK, NG_ADDR, NG_DRIVER, NG_SCAN = range(40, 45)
 
 YES_NO = ReplyKeyboardMarkup([["Yes", "No"]], one_time_keyboard=True, resize_keyboard=True)
 USE_ANYWAY = ReplyKeyboardMarkup([["Use it anyway"], ["Try again"]],
@@ -201,13 +220,32 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "  /coverwhale — full Cover Whale policy + full scanned PDF\n"
         "  /utility — generate a utility bill\n"
         "  /coc — generate a Confirmation of Coverage (6-page)\n"
+        "  /nganga — generate a declaration page\n"
         "  /scan — scan any PDF (or just send a PDF)\n"
-        "  /policy — view current policy number\n"
-        "  /setpolicy CUS09116674 — override policy number"
+        "  /policy — view current policy numbers\n"
+        "  /setpolicy CUS09116674 — override Cover Whale policy number\n"
+        "  /setngpolicy PT-26042618-01 — override Nganga policy number"
     )
 
 async def cmd_policy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"Current policy: {load_policy()}")
+    await update.message.reply_text(
+        f"Cover Whale: {load_policy()}\n"
+        f"Nganga:      {load_nganga_policy()}"
+    )
+
+async def cmd_setngpolicy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    args = ctx.args
+    if not args:
+        await update.message.reply_text("Usage: /setngpolicy PT-26042618-01")
+        return
+    value = args[0].strip()
+    try:
+        increment_nganga_policy(value)      # validates the PT-NNNNNNNN-NN shape
+    except ValueError as e:
+        await update.message.reply_text(str(e))
+        return
+    save_nganga_policy(value)
+    await update.message.reply_text(f"Nganga policy set to {value}")
 
 async def cmd_setpolicy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     args = ctx.args
@@ -757,6 +795,146 @@ async def got_cw_scan_no(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("All done!", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
+# ─── NGANGA DECLARATION PAGE HANDLERS ────────────────────────────────────────
+# Motor Carrier Liability Declaration Page. Company name and address come from
+# the CSV like /utility; the driver's full name is the one thing asked for.
+# VIN, model year, DOB, licence state and licence number are randomised.
+
+async def cmd_nganga(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Motor Carrier Liability Declaration Page\n\nCompany name?",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return NG_NAME
+
+async def _ng_ask_driver(update, ctx, company, address):
+    ctx.user_data["ng_company"] = company
+    ctx.user_data["ng_address"] = address
+    await update.message.reply_text(
+        f"Company: {company}\nAddress: {address}\n\nDriver's full name?",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return NG_DRIVER
+
+async def got_ng_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = await check_field(update, ctx, looks_like_company, "ng_name", "Company name?")
+    if query is None:
+        return NG_NAME
+    user = update.effective_user.first_name
+    logger.info(f"[{user}] Nganga search: \"{query}\"")
+    results = search_companies(query)
+
+    if len(results) == 1:
+        co = results[0]
+        logger.info(f"[{user}] Nganga match: {co['name']}")
+        return await _ng_ask_driver(update, ctx, co["name"], co["address"])
+
+    elif len(results) > 1:
+        logger.info(f"[{user}] Nganga multiple matches: {len(results)}")
+        ctx.user_data["ng_search_results"] = results
+        lines = [f"{i+1}. {co['name']}" for i, co in enumerate(results)]
+        buttons = [[str(i+1)] for i in range(len(results))]
+        buttons.append(["None of these"])
+        await update.message.reply_text(
+            f"Found {len(results)} matches:\n\n" + "\n".join(lines) +
+            "\n\nPick a number, or 'None of these' for manual entry.",
+            reply_markup=ReplyKeyboardMarkup(buttons, one_time_keyboard=True, resize_keyboard=True)
+        )
+        return NG_PICK
+
+    else:
+        logger.info(f"[{user}] Nganga no match — manual entry")
+        ctx.user_data["ng_company"] = query
+        await update.message.reply_text(
+            f"No match found for \"{query}\".\n\nEnter the address:"
+        )
+        return NG_ADDR
+
+async def got_ng_pick(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+
+    if text.lower() == "none of these":
+        await update.message.reply_text(
+            "Enter the company name for manual entry:",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return NG_NAME
+
+    results = ctx.user_data.get("ng_search_results", [])
+    try:
+        idx = int(text) - 1
+        if 0 <= idx < len(results):
+            co = results[idx]
+            return await _ng_ask_driver(update, ctx, co["name"], co["address"])
+    except ValueError:
+        pass
+
+    await update.message.reply_text("Invalid choice. Pick a number from the list, or 'None of these'.")
+    return NG_PICK
+
+async def got_ng_addr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    address = await check_field(update, ctx, looks_like_address, "ng_addr", "Enter the address:")
+    if address is None:
+        return NG_ADDR
+    return await _ng_ask_driver(update, ctx, ctx.user_data["ng_company"], address)
+
+async def got_ng_driver(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    driver  = update.message.text.strip()
+    if len(driver) < 2 or not any(c.isalpha() for c in driver):
+        await update.message.reply_text("That doesn't look like a name. Driver's full name?")
+        return NG_DRIVER
+
+    company = ctx.user_data["ng_company"]
+    address = ctx.user_data["ng_address"]
+    policy  = load_nganga_policy()
+
+    await update.message.reply_text("Generating declaration page...",
+                                    reply_markup=ReplyKeyboardRemove())
+    try:
+        path, det = generate_nganga(company, address, driver, policy)
+        ctx.user_data["generated_paths"] = [path]
+        with open(path, "rb") as f:
+            await update.message.reply_document(
+                document=f, filename=path.name,
+                caption=(f"{company} — {det['policy']}\n"
+                         f"VIN {det['vin']} ({det['year']})\n"
+                         f"{det['driver']} · DOB {det['dob']} · "
+                         f"{det['state']} {det['license']}"),
+                read_timeout=300, write_timeout=600, connect_timeout=60,
+            )
+        save_nganga_policy(increment_nganga_policy(policy))
+        logger.info(f"Nganga sent: {company} | {det['policy']}")
+        await update.message.reply_text("Want a scanned version?", reply_markup=YES_NO)
+        return NG_SCAN
+    except Exception as e:
+        logger.error(f"Nganga failed: {company} — {e}")
+        await update.message.reply_text(f"Error: {e}")
+        return ConversationHandler.END
+
+async def got_ng_scan_yes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    paths = ctx.user_data.get("generated_paths", [])
+    if not paths:
+        await update.message.reply_text("No PDFs to scan.", reply_markup=ReplyKeyboardRemove())
+        return ConversationHandler.END
+    await update.message.reply_text("Creating scanned version...", reply_markup=ReplyKeyboardRemove())
+    for path in paths:
+        try:
+            for jpg in scannify_pdf(path):
+                with open(jpg, "rb") as f:
+                    await update.message.reply_document(
+                        document=f, filename=jpg.name,
+                        read_timeout=300, write_timeout=600, connect_timeout=60,
+                    )
+        except Exception as e:
+            logger.error(f"Nganga scan failed: {path.name} — {e}")
+            await update.message.reply_text(f"Error scanning: {e}")
+    await update.message.reply_text("Done!")
+    return ConversationHandler.END
+
+async def got_ng_scan_no(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("All done!", reply_markup=ReplyKeyboardRemove())
+    return ConversationHandler.END
+
 # ─── SCAN ANY PDF ─────────────────────────────────────────────────────────────
 
 async def cmd_scan(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -879,10 +1057,27 @@ def main():
     app.add_handler(CommandHandler("scan",      cmd_scan))
     app.add_handler(CommandHandler("policy",    cmd_policy))
     app.add_handler(CommandHandler("setpolicy", cmd_setpolicy))
+    app.add_handler(CommandHandler("setngpolicy", cmd_setngpolicy))
+    nganga_conv = ConversationHandler(
+        entry_points=[CommandHandler("nganga", cmd_nganga)],
+        states={
+            NG_NAME:   [MessageHandler(filters.TEXT & ~filters.COMMAND, got_ng_name)],
+            NG_PICK:   [MessageHandler(filters.TEXT & ~filters.COMMAND, got_ng_pick)],
+            NG_ADDR:   [MessageHandler(filters.TEXT & ~filters.COMMAND, got_ng_addr)],
+            NG_DRIVER: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_ng_driver)],
+            NG_SCAN:   [
+                MessageHandler(filters.Regex(r"(?i)^yes$"), got_ng_scan_yes),
+                MessageHandler(filters.Regex(r"(?i)^no$"),  got_ng_scan_no),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+    )
+
     app.add_handler(conv)
     app.add_handler(util_conv)
     app.add_handler(coc_conv)
     app.add_handler(cw_conv)
+    app.add_handler(nganga_conv)
     app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf_file))
 
     async def post_init(application):
@@ -891,9 +1086,11 @@ def main():
             BotCommand("coverwhale", "Generate full Cover Whale policy + scan"),
             BotCommand("utility",   "Generate a utility bill"),
             BotCommand("coc",       "Generate a Confirmation of Coverage"),
+            BotCommand("nganga",    "Generate a declaration page"),
             BotCommand("scan",      "Scan any PDF document"),
-            BotCommand("policy",    "View current policy number"),
-            BotCommand("setpolicy", "Override policy number"),
+            BotCommand("policy",    "View current policy numbers"),
+            BotCommand("setpolicy", "Override Cover Whale policy number"),
+            BotCommand("setngpolicy", "Override Nganga policy number"),
             BotCommand("cancel",    "Cancel current operation"),
         ])
 

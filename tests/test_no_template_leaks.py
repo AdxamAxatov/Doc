@@ -29,13 +29,20 @@ COC_SAMPLES = [g.COC_NAME, g.COC_NAME_P1, g.COC_ADDR1, g.COC_ADDR2,
 CW_SAMPLES = [g.T_COMPANY, g.T_POLICY, g.T_ADDR1, g.T_ADDR2,
               g.ALT_COMPANY_P4, g.ALT_COMPANY_REST, g.ALT_POLICY,
               g.CW_OLD_GARAGE] + list(g.CW_OLD_VINS)
+NGANGA_SAMPLES = [g.NG_COMPANY, g.NG_ADDR1, g.NG_ADDR2, g.NG_VIN, g.NG_YEAR,
+                  g.NG_DRIVER, g.NG_DOB, g.NG_LICENSE, g.NG_PREPARED,
+                  g.NG_PERIOD, g.NGANGA_POLICY]
+
+NGANGA_DRIVER = "Marcus Delacroix"
 
 
 def text_of(path):
     doc = fitz.open(path)
-    # The writer emits non-breaking spaces between words; normalise so the
-    # "new value is present" checks below can use ordinary spaces.
-    return "\n".join(doc[i].get_text() for i in range(len(doc))).replace("\xa0", " ")
+    # The writer emits non-breaking spaces between words, and maps an ASCII
+    # hyphen to U+2010 HYPHEN. Both render identically but break a plain
+    # substring match, so normalise before the checks below.
+    text = "\n".join(doc[i].get_text() for i in range(len(doc)))
+    return text.replace("\xa0", " ").replace("‐", "-")
 
 
 with tempfile.TemporaryDirectory() as tmp:
@@ -47,6 +54,9 @@ with tempfile.TemporaryDirectory() as tmp:
         "coc": (g.generate_coc(COMPANY, ADDRESS, out, dates=dates), COC_SAMPLES),
         "cw": (g.generate_coverwhale(COMPANY, USDOT, ADDRESS, "CUS09116674", out,
                                      rng=random.Random(3)), CW_SAMPLES),
+        "nganga": (g.generate_nganga(COMPANY, ADDRESS, NGANGA_DRIVER,
+                                     "PT-26042619-01", out,
+                                     rng=random.Random(5))[0], NGANGA_SAMPLES),
     }
 
     for name, (path, samples) in docs.items():
@@ -64,6 +74,12 @@ with tempfile.TemporaryDirectory() as tmp:
     coc_text = text_of(docs["coc"][0])
     if dates["start_slash"] not in coc_text:
         failures.append(f"coc: start date {dates['start_slash']!r} missing from output")
+
+    nganga_text = text_of(docs["nganga"][0])
+    if NGANGA_DRIVER not in nganga_text:
+        failures.append(f"nganga: driver {NGANGA_DRIVER!r} missing from output")
+    if "PT-26042619-01" not in nganga_text:
+        failures.append("nganga: policy number missing from output")
 
     util_text = text_of(docs["utility"][0])
     if "2404 KARBA WAY" not in util_text:

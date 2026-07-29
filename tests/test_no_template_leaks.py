@@ -10,6 +10,7 @@ import os
 import random
 import sys
 import tempfile
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -21,6 +22,12 @@ failures = []
 COMPANY = "SAINT LOUIS FAM INC"
 USDOT = "3213915"
 ADDRESS = "2404 KARBA WAY, KISSIMMEE, FL 34746"
+
+# Nganga randomises the DOB, the prepared date and the policy period from the
+# current date, so pin it. Without this the generated values drift daily and can
+# collide with the template samples below.
+NGANGA_TODAY = date(2026, 6, 15)
+NGANGA_POLICY_IN = "PT-26042619-01"
 
 # Sample values baked into each template. None may survive into the output.
 UTILITY_SAMPLES = [g.UT_NAME, "10318 CHEEVES", "HOUSTON, TX 77016"]
@@ -35,28 +42,51 @@ NGANGA_SAMPLES = [g.NG_COMPANY, g.NG_ADDR1, g.NG_ADDR2, g.NG_VIN, g.NG_YEAR,
 
 NGANGA_DRIVER = "Marcus Delacroix"
 
+# An ASCII hyphen written with macOS system Arial does not round-trip: its
+# hyphen glyph is shared with U+00AD SOFT HYPHEN and that is what MuPDF's
+# reverse cmap picks, so extraction gives "PT\xad26042619\xad01". DejaVu and the
+# base-14 fonts are unaffected. It reaches Nganga because Calibri falls back to
+# Arial where Calibri is not installed, and the CoC page-1 term line because
+# that uses Arial Black. Renders correctly either way, but it breaks a plain
+# substring match — so fold the dash codepoints back, along with the
+# non-breaking spaces the writer puts between words.
+_DASHES = dict.fromkeys(map(ord, "­‐‑‒–−"), "-")
+
 
 def text_of(path):
     doc = fitz.open(path)
-    # The writer emits non-breaking spaces between words, and maps an ASCII
-    # hyphen to U+2010 HYPHEN. Both render identically but break a plain
-    # substring match, so normalise before the checks below.
     text = "\n".join(doc[i].get_text() for i in range(len(doc)))
-    return text.replace("\xa0", " ").replace("‐", "-")
+    return text.replace("\xa0", " ").translate(_DASHES)
 
 
 with tempfile.TemporaryDirectory() as tmp:
     out = Path(tmp)
     dates = g._coc_dates(rng=random.Random(7))
 
+    ng_path, ng_details = g.generate_nganga(
+        COMPANY, ADDRESS, NGANGA_DRIVER, NGANGA_POLICY_IN, out,
+        today=NGANGA_TODAY, rng=random.Random(5))
+
+    # A randomised field can legitimately come out equal to the template's own
+    # sample: random_year picks 2014-2019 and NG_YEAR is "2016", so one seed in
+    # six collides. Then "2016" in the output is the correct new value, but the
+    # leak check below cannot tell it from a leftover and would report a failure
+    # that is not real. Assert the chosen seed and date avoid that, so the
+    # ambiguity is a loud deterministic error rather than a false alarm — and so
+    # no sample has to be dropped from the leak check to dodge it.
+    collisions = sorted(set(NGANGA_SAMPLES) & {str(v) for v in ng_details.values()})
+    if collisions:
+        failures.append(
+            f"nganga: generated value(s) equal a template sample: {collisions}. "
+            f"Pick a different seed or NGANGA_TODAY so the leak check stays unambiguous."
+        )
+
     docs = {
         "utility": (g.generate_utility(COMPANY, ADDRESS, out), UTILITY_SAMPLES),
         "coc": (g.generate_coc(COMPANY, ADDRESS, out, dates=dates), COC_SAMPLES),
         "cw": (g.generate_coverwhale(COMPANY, USDOT, ADDRESS, "CUS09116674", out,
                                      rng=random.Random(3)), CW_SAMPLES),
-        "nganga": (g.generate_nganga(COMPANY, ADDRESS, NGANGA_DRIVER,
-                                     "PT-26042619-01", out,
-                                     rng=random.Random(5))[0], NGANGA_SAMPLES),
+        "nganga": (ng_path, NGANGA_SAMPLES),
     }
 
     for name, (path, samples) in docs.items():
@@ -75,11 +105,16 @@ with tempfile.TemporaryDirectory() as tmp:
     if dates["start_slash"] not in coc_text:
         failures.append(f"coc: start date {dates['start_slash']!r} missing from output")
 
-    nganga_text = text_of(docs["nganga"][0])
+    # Every randomised value must actually reach the page. This is the
+    # counterweight to the leak checks: a replacement that stripped the sample
+    # and wrote nothing would otherwise look like a pass.
+    nganga_text = text_of(ng_path)
     if NGANGA_DRIVER not in nganga_text:
         failures.append(f"nganga: driver {NGANGA_DRIVER!r} missing from output")
-    if "PT-26042619-01" not in nganga_text:
-        failures.append("nganga: policy number missing from output")
+    for field in ("policy", "vin", "dob", "license", "prepared", "period"):
+        value = str(ng_details[field])
+        if value not in nganga_text:
+            failures.append(f"nganga: {field} {value!r} missing from output")
 
     util_text = text_of(docs["utility"][0])
     if "2404 KARBA WAY" not in util_text:

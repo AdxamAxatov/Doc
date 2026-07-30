@@ -10,7 +10,7 @@ Run:  py generate.py
 
 import fitz
 import openpyxl
-import os, sys, urllib.request, zipfile, io, logging, random, calendar, inspect
+import os, sys, urllib.request, zipfile, io, logging, random, calendar, inspect, re
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from PIL import Image, ImageFilter, ImageEnhance
@@ -589,6 +589,64 @@ def _paint_plans(page, plans, pix, color=None, font_reg=None, fontname_tag=None,
         page.insert_text((x, y), new_text, fontfile=fp, fontname=fnm, fontsize=sz, color=text_color)
 
 
+# Destination codepoints MuPDF picks that we never actually write, and what they
+# should have been. Keys and values are the 4-hex-digit forms used in a CMap.
+_TOUNICODE_FIXES = {b"00ad": b"002d",     # SOFT HYPHEN    -> HYPHEN-MINUS
+                    b"00a0": b"0020"}     # NO-BREAK SPACE -> SPACE
+
+# One `<src> <dst>` pair on its own line, i.e. a single-character bfchar entry.
+# Deliberately not bfrange: rewriting the start of a range would shift every
+# codepoint in it. Anchored so only the destination is ever touched — <00a0>
+# also occurs on the left as a glyph code (`<00a0> <00e6>`), and a blind byte
+# replacement would corrupt that entry.
+_BFCHAR_ENTRY = re.compile(
+    rb"^(\s*<[0-9A-Fa-f]{4}>\s*<)(" + b"|".join(_TOUNICODE_FIXES) + rb")(>\s*)$",
+    re.MULTILINE | re.IGNORECASE)
+
+
+def _fix_text_extraction(doc):
+    """Correct the ToUnicode CMaps MuPDF generates for the fonts we embed.
+
+    macOS Arial maps U+002D and U+00AD onto one hyphen glyph, and U+0020 and
+    U+00A0 onto one space glyph. MuPDF's reverse lookup takes the higher
+    codepoint, so the CMap it writes says
+
+        <0010> <00ad>      hyphen glyph -> SOFT HYPHEN
+        <0003> <00a0>      space  glyph -> NO-BREAK SPACE
+
+    The page renders correctly either way, but extraction and copy/paste hand
+    back "PT\\xad26042619\\xad01" — an invisible character inside a policy
+    number — and every word separated by NBSP instead of a space.
+
+    We never write a real soft hyphen or NBSP, so correcting those two
+    destinations is unambiguous. Worst case a template's own font legitimately
+    mapped one, and its extraction gains an ordinary hyphen or space instead.
+    """
+    for xref in range(1, doc.xref_length()):
+        tu = doc.xref_get_key(xref, "ToUnicode")
+        if tu[0] != "xref":
+            continue
+        stream_xref = int(tu[1].split()[0])
+        try:
+            cmap = doc.xref_stream(stream_xref)
+        except Exception:
+            continue
+        if not cmap:
+            continue
+        fixed = _BFCHAR_ENTRY.sub(
+            lambda m: m.group(1) + _TOUNICODE_FIXES[m.group(2).lower()] + m.group(3),
+            cmap)
+        if fixed != cmap:
+            doc.update_stream(stream_xref, fixed)
+
+
+def save_pdf(doc, out):
+    """Save a generated document. Repairs text extraction first — every save
+    goes through here so no output can skip that."""
+    _fix_text_extraction(doc)
+    doc.save(str(out), garbage=4, deflate=True)
+
+
 def _accepted_opts(fn, skip):
     """Keyword names `fn` names explicitly, ignoring its catch-all **kwargs."""
     return {name for name, p in inspect.signature(fn).parameters.items()
@@ -829,7 +887,7 @@ def generate_utility(company: str, address: str, output_dir: Path = None) -> Pat
             .replace("<","").replace(">","").replace("|","")
             .replace("'",""))
     out = output_dir / f"Utility_{safe}.pdf"
-    doc.save(str(out), garbage=4, deflate=True)
+    save_pdf(doc, out)
     doc.close()
     logger.info(f"Utility bill saved: {out.name}")
     return out
@@ -884,7 +942,7 @@ def generate_coc(company: str, address: str, output_dir: Path = None, dates: dic
             .replace("<","").replace(">","").replace("|","")
             .replace("'",""))
     out = output_dir / f"COC_{safe}.pdf"
-    doc.save(str(out), garbage=4, deflate=True)
+    save_pdf(doc, out)
     doc.close()
     logger.info(f"Confirmation of Coverage saved: {out.name}")
     return out
@@ -1134,7 +1192,7 @@ def generate_coverwhale(company: str, usdot: str, address: str, policy: str,
             .replace("<", "").replace(">", "").replace("|", "")
             .replace("'", ""))
     out = output_dir / f"Cover Whale - {safe}.pdf"
-    doc.save(str(out), garbage=4, deflate=True)
+    save_pdf(doc, out)
     doc.close()
     logger.info(f"Cover Whale full policy saved: {out.name}")
     return out
@@ -1287,7 +1345,7 @@ def generate_nganga(company: str, address: str, driver: str, policy: str,
             .replace("<","").replace(">","").replace("|","")
             .replace("'",""))
     out = output_dir / f"{safe}_Policy_{today.strftime('%m%d%y')}.pdf"
-    doc.save(str(out), garbage=4, deflate=True)
+    save_pdf(doc, out)
     doc.close()
 
     details = {"policy": policy, "vin": vin, "year": year, "driver": driver,
@@ -1410,7 +1468,7 @@ def scannify_to_pdf(input_path: Path, output_dir: Path = None, dpi: int = 200) -
     if base.startswith("COC_"):           # drop the doc-type prefix from the scan name
         base = base[len("COC_"):]
     out = output_dir / f"{base}_scanned_{stamp}.pdf"
-    out_doc.save(str(out), garbage=4, deflate=True)
+    save_pdf(out_doc, out)
     out_doc.close()
     logger.info(f"Scanned PDF saved: {out.name}")
     return out
@@ -1507,7 +1565,7 @@ def generate():
                     .replace("<","").replace(">", "").replace("|",  "")
                     .replace("'",""))
             out = OUTPUT_DIR / f"Cover Whale - {safe}.pdf"
-            doc.save(str(out), garbage=4, deflate=True)
+            save_pdf(doc, out)
             doc.close()
             print(f"        Saved  -> {out.name}")
             logger.info(f"Saved: {out.name}")

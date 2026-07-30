@@ -42,21 +42,16 @@ NGANGA_SAMPLES = [g.NG_COMPANY, g.NG_ADDR1, g.NG_ADDR2, g.NG_VIN, g.NG_YEAR,
 
 NGANGA_DRIVER = "Marcus Delacroix"
 
-# An ASCII hyphen written with macOS system Arial does not round-trip: its
-# hyphen glyph is shared with U+00AD SOFT HYPHEN and that is what MuPDF's
-# reverse cmap picks, so extraction gives "PT\xad26042619\xad01". DejaVu and the
-# base-14 fonts are unaffected. It reaches Nganga because Calibri falls back to
-# Arial where Calibri is not installed, and the CoC page-1 term line because
-# that uses Arial Black. Renders correctly either way, but it breaks a plain
-# substring match — so fold the dash codepoints back, along with the
-# non-breaking spaces the writer puts between words.
-_DASHES = dict.fromkeys(map(ord, "­‐‑‒–−"), "-")
-
-
 def text_of(path):
+    """Extracted text, deliberately unnormalised.
+
+    Written values used to come back out with U+00AD for a hyphen and U+00A0 for
+    a space, because macOS Arial shares those glyphs and MuPDF's reverse cmap
+    took the higher codepoint. save_pdf now repairs the ToUnicode CMap, so what
+    we wrote is what extracts. Normalising here would hide that regressing.
+    """
     doc = fitz.open(path)
-    text = "\n".join(doc[i].get_text() for i in range(len(doc)))
-    return text.replace("\xa0", " ").translate(_DASHES)
+    return "\n".join(doc[i].get_text() for i in range(len(doc)))
 
 
 with tempfile.TemporaryDirectory() as tmp:

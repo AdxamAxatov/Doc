@@ -10,7 +10,7 @@ Run:  py generate.py
 
 import fitz
 import openpyxl
-import os, sys, urllib.request, zipfile, io, logging, random, calendar, inspect
+import os, sys, urllib.request, zipfile, io, logging, random, calendar, inspect, re
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from PIL import Image, ImageFilter, ImageEnhance
@@ -49,6 +49,23 @@ _MAC_ARIAL   = Path("/System/Library/Fonts/Supplemental/Arial.ttf")
 _MAC_ARIAL_B = Path("/System/Library/Fonts/Supplemental/Arial Bold.ttf")
 ARIAL_REG  = _MAC_ARIAL   if _MAC_ARIAL.exists()   else Path("C:/Windows/Fonts/arial.ttf")
 ARIAL_BOLD = _MAC_ARIAL_B if _MAC_ARIAL_B.exists() else Path("C:/Windows/Fonts/arialbd.ttf")
+
+
+def _urlopen(url, timeout=30):
+    """urlopen with a trust store that actually works.
+
+    A venv Python on macOS has no CA bundle of its own, so plain urlopen fails
+    with CERTIFICATE_VERIFY_FAILED and every font download dies silently.
+    certifi ships one; use it when it is importable.
+    """
+    context = None
+    try:
+        import ssl
+        import certifi
+        context = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        pass
+    return urllib.request.urlopen(url, timeout=timeout, context=context)
 
 
 def _sys_font(*candidates, fallback):
@@ -104,16 +121,60 @@ UT_ADDR2   = "HOUSTON, TX 77016"
 NGANGA_TEMPLATE = ASSETS_DIR / "template" / "Pricely Fane LLC_Policy_040226_unlocked-1-2.pdf"
 NGANGA_POLICY   = "PT-26042618-01"
 
-# Calibri ships with Windows and with Microsoft Office on macOS; fall back to
-# Arial (metrically closer than DejaVu) so a machine without it still renders.
+# Carlito is metrically compatible with Calibri (same advance widths, so layout
+# is unchanged) and is SIL Open Font Licensed, unlike Calibri itself.
+CARLITO_REG_ASSET  = ASSETS_DIR / "Carlito-Regular.ttf"
+CARLITO_BOLD_ASSET = ASSETS_DIR / "Carlito-Bold.ttf"
+CARLITO_URL = "https://raw.githubusercontent.com/google/fonts/main/ofl/carlito/"
+
+
+def ensure_calibri():
+    """Make a Calibri-metric font available for the declaration page.
+
+    The template is set in Calibri, which is proprietary: it ships with Windows
+    and with Office, and there is nothing to legitimately download. Carlito is
+    the metric-compatible substitute, so the page lays out identically.
+
+    The template does embed Calibri, and taking it from there was tried — but
+    an embedded font is a *subset*. Its cmap covers everything while the glyphs
+    the original document never used have no outlines, so `has_glyph` says yes
+    and the page renders holes: "SAINT LOUIS FAM INC" lost its W, policy number
+    "...19-01" lost its 9. The bold subset was missing JKQXZ3579. Not usable.
+
+    Silent on failure — the fallback chain below still yields a usable font.
+    """
+    # OFL.txt travels with the fonts: the licence asks for its notice to be
+    # included wherever the font software goes.
+    for dest, floor in ((CARLITO_REG_ASSET, 50_000),
+                        (CARLITO_BOLD_ASSET, 50_000),
+                        (ASSETS_DIR / "Carlito-OFL.txt", 1_000)):
+        if dest.exists():
+            continue
+        name = "OFL.txt" if dest.name.endswith(".txt") else dest.name
+        try:
+            with _urlopen(CARLITO_URL + name) as r:
+                data = r.read()
+            if len(data) < floor:             # a truncated or error response
+                raise ValueError(f"suspiciously small download: {len(data)} bytes")
+            dest.write_bytes(data)
+            logger.info(f"Downloaded {dest.name} ({len(data)} bytes)")
+        except Exception as e:
+            logger.warning(f"Could not fetch {dest.name}: {e}")
+
+
+ensure_calibri()
+
+# A real Calibri if the machine has one, else Carlito (same metrics), else Arial.
 CALIBRI_REG  = _sys_font("/Library/Fonts/Microsoft/Calibri.ttf",
                          "/Library/Fonts/Calibri.ttf",
                          str(Path.home() / "Library/Fonts/Calibri.ttf"),
-                         "C:/Windows/Fonts/calibri.ttf", fallback=ARIAL_REG)
+                         "C:/Windows/Fonts/calibri.ttf",
+                         CARLITO_REG_ASSET, fallback=ARIAL_REG)
 CALIBRI_BOLD = _sys_font("/Library/Fonts/Microsoft/Calibri Bold.ttf",
                          "/Library/Fonts/Calibrib.ttf",
                          str(Path.home() / "Library/Fonts/Calibri Bold.ttf"),
-                         "C:/Windows/Fonts/calibrib.ttf", fallback=ARIAL_BOLD)
+                         "C:/Windows/Fonts/calibrib.ttf",
+                         CARLITO_BOLD_ASSET, fallback=ARIAL_BOLD)
 
 NG_COMPANY = "Pricely Fane LLC"
 NG_ADDR1   = "5270 Millenia Blvd"
@@ -208,7 +269,7 @@ def ensure_fonts():
     if FONT_REG.exists() and FONT_BOLD.exists():
         return
     print("  Downloading DejaVu fonts (one-time) ...")
-    with urllib.request.urlopen(FONT_ZIP) as r:
+    with _urlopen(FONT_ZIP, timeout=60) as r:
         data = r.read()
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         for m in zf.namelist():
@@ -589,6 +650,71 @@ def _paint_plans(page, plans, pix, color=None, font_reg=None, fontname_tag=None,
         page.insert_text((x, y), new_text, fontfile=fp, fontname=fnm, fontsize=sz, color=text_color)
 
 
+# Destination codepoints MuPDF picks that we never actually write, and what they
+# should have been. Keys and values are the 4-hex-digit forms used in a CMap.
+#
+# Which wrong codepoint you get depends on the font: Arial's hyphen glyph
+# reverse-maps to U+00AD, Calibri's to U+2010. Both share the glyph with
+# U+002D. en dash and em dash are deliberately absent — those are visually
+# distinct characters a template may legitimately contain.
+_TOUNICODE_FIXES = {b"00ad": b"002d",     # SOFT HYPHEN          -> HYPHEN-MINUS
+                    b"2010": b"002d",     # HYPHEN               -> HYPHEN-MINUS
+                    b"2011": b"002d",     # NON-BREAKING HYPHEN  -> HYPHEN-MINUS
+                    b"00a0": b"0020"}     # NO-BREAK SPACE       -> SPACE
+
+# One `<src> <dst>` pair on its own line, i.e. a single-character bfchar entry.
+# Deliberately not bfrange: rewriting the start of a range would shift every
+# codepoint in it. Anchored so only the destination is ever touched — <00a0>
+# also occurs on the left as a glyph code (`<00a0> <00e6>`), and a blind byte
+# replacement would corrupt that entry.
+_BFCHAR_ENTRY = re.compile(
+    rb"^(\s*<[0-9A-Fa-f]{4}>\s*<)(" + b"|".join(_TOUNICODE_FIXES) + rb")(>\s*)$",
+    re.MULTILINE | re.IGNORECASE)
+
+
+def _fix_text_extraction(doc):
+    """Correct the ToUnicode CMaps MuPDF generates for the fonts we embed.
+
+    macOS Arial maps U+002D and U+00AD onto one hyphen glyph, and U+0020 and
+    U+00A0 onto one space glyph. MuPDF's reverse lookup takes the higher
+    codepoint, so the CMap it writes says
+
+        <0010> <00ad>      hyphen glyph -> SOFT HYPHEN
+        <0003> <00a0>      space  glyph -> NO-BREAK SPACE
+
+    The page renders correctly either way, but extraction and copy/paste hand
+    back "PT\\xad26042619\\xad01" — an invisible character inside a policy
+    number — and every word separated by NBSP instead of a space.
+
+    We never write a real soft hyphen or NBSP, so correcting those two
+    destinations is unambiguous. Worst case a template's own font legitimately
+    mapped one, and its extraction gains an ordinary hyphen or space instead.
+    """
+    for xref in range(1, doc.xref_length()):
+        tu = doc.xref_get_key(xref, "ToUnicode")
+        if tu[0] != "xref":
+            continue
+        stream_xref = int(tu[1].split()[0])
+        try:
+            cmap = doc.xref_stream(stream_xref)
+        except Exception:
+            continue
+        if not cmap:
+            continue
+        fixed = _BFCHAR_ENTRY.sub(
+            lambda m: m.group(1) + _TOUNICODE_FIXES[m.group(2).lower()] + m.group(3),
+            cmap)
+        if fixed != cmap:
+            doc.update_stream(stream_xref, fixed)
+
+
+def save_pdf(doc, out):
+    """Save a generated document. Repairs text extraction first — every save
+    goes through here so no output can skip that."""
+    _fix_text_extraction(doc)
+    doc.save(str(out), garbage=4, deflate=True)
+
+
 def _accepted_opts(fn, skip):
     """Keyword names `fn` names explicitly, ignoring its catch-all **kwargs."""
     return {name for name, p in inspect.signature(fn).parameters.items()
@@ -829,7 +955,7 @@ def generate_utility(company: str, address: str, output_dir: Path = None) -> Pat
             .replace("<","").replace(">","").replace("|","")
             .replace("'",""))
     out = output_dir / f"Utility_{safe}.pdf"
-    doc.save(str(out), garbage=4, deflate=True)
+    save_pdf(doc, out)
     doc.close()
     logger.info(f"Utility bill saved: {out.name}")
     return out
@@ -884,7 +1010,7 @@ def generate_coc(company: str, address: str, output_dir: Path = None, dates: dic
             .replace("<","").replace(">","").replace("|","")
             .replace("'",""))
     out = output_dir / f"COC_{safe}.pdf"
-    doc.save(str(out), garbage=4, deflate=True)
+    save_pdf(doc, out)
     doc.close()
     logger.info(f"Confirmation of Coverage saved: {out.name}")
     return out
@@ -1134,7 +1260,7 @@ def generate_coverwhale(company: str, usdot: str, address: str, policy: str,
             .replace("<", "").replace(">", "").replace("|", "")
             .replace("'", ""))
     out = output_dir / f"Cover Whale - {safe}.pdf"
-    doc.save(str(out), garbage=4, deflate=True)
+    save_pdf(doc, out)
     doc.close()
     logger.info(f"Cover Whale full policy saved: {out.name}")
     return out
@@ -1287,7 +1413,7 @@ def generate_nganga(company: str, address: str, driver: str, policy: str,
             .replace("<","").replace(">","").replace("|","")
             .replace("'",""))
     out = output_dir / f"{safe}_Policy_{today.strftime('%m%d%y')}.pdf"
-    doc.save(str(out), garbage=4, deflate=True)
+    save_pdf(doc, out)
     doc.close()
 
     details = {"policy": policy, "vin": vin, "year": year, "driver": driver,
@@ -1410,7 +1536,7 @@ def scannify_to_pdf(input_path: Path, output_dir: Path = None, dpi: int = 200) -
     if base.startswith("COC_"):           # drop the doc-type prefix from the scan name
         base = base[len("COC_"):]
     out = output_dir / f"{base}_scanned_{stamp}.pdf"
-    out_doc.save(str(out), garbage=4, deflate=True)
+    save_pdf(out_doc, out)
     out_doc.close()
     logger.info(f"Scanned PDF saved: {out.name}")
     return out
@@ -1507,7 +1633,7 @@ def generate():
                     .replace("<","").replace(">", "").replace("|",  "")
                     .replace("'",""))
             out = OUTPUT_DIR / f"Cover Whale - {safe}.pdf"
-            doc.save(str(out), garbage=4, deflate=True)
+            save_pdf(doc, out)
             doc.close()
             print(f"        Saved  -> {out.name}")
             logger.info(f"Saved: {out.name}")

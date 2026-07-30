@@ -30,6 +30,7 @@ from generate import (
     fill_page_header_only, increment_policy, scannify_pdf, scannify_to_pdf,
     generate_utility, generate_coc, generate_coverwhale,
     generate_nganga, increment_nganga_policy, NGANGA_POLICY,
+    save_pdf,
     PROJECT_DIR, OUTPUT_DIR, TEMPLATE_PDF,
     FONT_REG, FONT_BOLD, logger,
 )
@@ -201,7 +202,7 @@ def make_pdf(company: str, usdot: str, address: str, policy: str) -> Path:
             .replace("<","").replace(">","").replace("|","")
             .replace("'",""))
     out = OUTPUT_DIR / f"Cover Whale - {safe}.pdf"
-    doc.save(str(out), garbage=4, deflate=True)
+    save_pdf(doc, out)
     doc.close()
     return out
 

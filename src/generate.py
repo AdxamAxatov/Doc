@@ -51,6 +51,23 @@ ARIAL_REG  = _MAC_ARIAL   if _MAC_ARIAL.exists()   else Path("C:/Windows/Fonts/a
 ARIAL_BOLD = _MAC_ARIAL_B if _MAC_ARIAL_B.exists() else Path("C:/Windows/Fonts/arialbd.ttf")
 
 
+def _urlopen(url, timeout=30):
+    """urlopen with a trust store that actually works.
+
+    A venv Python on macOS has no CA bundle of its own, so plain urlopen fails
+    with CERTIFICATE_VERIFY_FAILED and every font download dies silently.
+    certifi ships one; use it when it is importable.
+    """
+    context = None
+    try:
+        import ssl
+        import certifi
+        context = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        pass
+    return urllib.request.urlopen(url, timeout=timeout, context=context)
+
+
 def _sys_font(*candidates, fallback):
     """First existing path among `candidates`, else `fallback`.
 
@@ -104,16 +121,60 @@ UT_ADDR2   = "HOUSTON, TX 77016"
 NGANGA_TEMPLATE = ASSETS_DIR / "template" / "Pricely Fane LLC_Policy_040226_unlocked-1-2.pdf"
 NGANGA_POLICY   = "PT-26042618-01"
 
-# Calibri ships with Windows and with Microsoft Office on macOS; fall back to
-# Arial (metrically closer than DejaVu) so a machine without it still renders.
+# Carlito is metrically compatible with Calibri (same advance widths, so layout
+# is unchanged) and is SIL Open Font Licensed, unlike Calibri itself.
+CARLITO_REG_ASSET  = ASSETS_DIR / "Carlito-Regular.ttf"
+CARLITO_BOLD_ASSET = ASSETS_DIR / "Carlito-Bold.ttf"
+CARLITO_URL = "https://raw.githubusercontent.com/google/fonts/main/ofl/carlito/"
+
+
+def ensure_calibri():
+    """Make a Calibri-metric font available for the declaration page.
+
+    The template is set in Calibri, which is proprietary: it ships with Windows
+    and with Office, and there is nothing to legitimately download. Carlito is
+    the metric-compatible substitute, so the page lays out identically.
+
+    The template does embed Calibri, and taking it from there was tried — but
+    an embedded font is a *subset*. Its cmap covers everything while the glyphs
+    the original document never used have no outlines, so `has_glyph` says yes
+    and the page renders holes: "SAINT LOUIS FAM INC" lost its W, policy number
+    "...19-01" lost its 9. The bold subset was missing JKQXZ3579. Not usable.
+
+    Silent on failure — the fallback chain below still yields a usable font.
+    """
+    # OFL.txt travels with the fonts: the licence asks for its notice to be
+    # included wherever the font software goes.
+    for dest, floor in ((CARLITO_REG_ASSET, 50_000),
+                        (CARLITO_BOLD_ASSET, 50_000),
+                        (ASSETS_DIR / "Carlito-OFL.txt", 1_000)):
+        if dest.exists():
+            continue
+        name = "OFL.txt" if dest.name.endswith(".txt") else dest.name
+        try:
+            with _urlopen(CARLITO_URL + name) as r:
+                data = r.read()
+            if len(data) < floor:             # a truncated or error response
+                raise ValueError(f"suspiciously small download: {len(data)} bytes")
+            dest.write_bytes(data)
+            logger.info(f"Downloaded {dest.name} ({len(data)} bytes)")
+        except Exception as e:
+            logger.warning(f"Could not fetch {dest.name}: {e}")
+
+
+ensure_calibri()
+
+# A real Calibri if the machine has one, else Carlito (same metrics), else Arial.
 CALIBRI_REG  = _sys_font("/Library/Fonts/Microsoft/Calibri.ttf",
                          "/Library/Fonts/Calibri.ttf",
                          str(Path.home() / "Library/Fonts/Calibri.ttf"),
-                         "C:/Windows/Fonts/calibri.ttf", fallback=ARIAL_REG)
+                         "C:/Windows/Fonts/calibri.ttf",
+                         CARLITO_REG_ASSET, fallback=ARIAL_REG)
 CALIBRI_BOLD = _sys_font("/Library/Fonts/Microsoft/Calibri Bold.ttf",
                          "/Library/Fonts/Calibrib.ttf",
                          str(Path.home() / "Library/Fonts/Calibri Bold.ttf"),
-                         "C:/Windows/Fonts/calibrib.ttf", fallback=ARIAL_BOLD)
+                         "C:/Windows/Fonts/calibrib.ttf",
+                         CARLITO_BOLD_ASSET, fallback=ARIAL_BOLD)
 
 NG_COMPANY = "Pricely Fane LLC"
 NG_ADDR1   = "5270 Millenia Blvd"
@@ -208,7 +269,7 @@ def ensure_fonts():
     if FONT_REG.exists() and FONT_BOLD.exists():
         return
     print("  Downloading DejaVu fonts (one-time) ...")
-    with urllib.request.urlopen(FONT_ZIP) as r:
+    with _urlopen(FONT_ZIP, timeout=60) as r:
         data = r.read()
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         for m in zf.namelist():
@@ -591,8 +652,15 @@ def _paint_plans(page, plans, pix, color=None, font_reg=None, fontname_tag=None,
 
 # Destination codepoints MuPDF picks that we never actually write, and what they
 # should have been. Keys and values are the 4-hex-digit forms used in a CMap.
-_TOUNICODE_FIXES = {b"00ad": b"002d",     # SOFT HYPHEN    -> HYPHEN-MINUS
-                    b"00a0": b"0020"}     # NO-BREAK SPACE -> SPACE
+#
+# Which wrong codepoint you get depends on the font: Arial's hyphen glyph
+# reverse-maps to U+00AD, Calibri's to U+2010. Both share the glyph with
+# U+002D. en dash and em dash are deliberately absent — those are visually
+# distinct characters a template may legitimately contain.
+_TOUNICODE_FIXES = {b"00ad": b"002d",     # SOFT HYPHEN          -> HYPHEN-MINUS
+                    b"2010": b"002d",     # HYPHEN               -> HYPHEN-MINUS
+                    b"2011": b"002d",     # NON-BREAKING HYPHEN  -> HYPHEN-MINUS
+                    b"00a0": b"0020"}     # NO-BREAK SPACE       -> SPACE
 
 # One `<src> <dst>` pair on its own line, i.e. a single-character bfchar entry.
 # Deliberately not bfrange: rewriting the start of a range would shift every
